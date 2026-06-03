@@ -28,17 +28,17 @@ def check_dependencies():
         print("Run: pip install -r requirements.txt")
         sys.exit(1)
     
-    # Check Playwright browsers
+    # Check Playwright CLI (use same Python as this script — venv-safe)
     try:
-        result = subprocess.run(
-            ["playwright", "install", "--help"],
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "--help"],
             capture_output=True,
-            check=True
+            check=True,
         )
         print("✓ Playwright OK")
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("✗ Playwright not installed")
-        print("Run: playwright install chromium")
+        print("✗ Playwright CLI not available")
+        print(f"Run: {sys.executable} -m playwright install chromium")
         sys.exit(1)
     
     # Check Node/npm for Electron

@@ -9,7 +9,8 @@ import logging
 import re
 from typing import Dict, Any, Optional
 import google.generativeai as genai
-import keyring
+
+from server.credentials import load_gemini_api_key, validate_gemini_api_key, configure_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -40,25 +41,19 @@ class OpenClawClient:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self.api_key = load_gemini_api_key(config)
         
-        # Try to load API key from OS keychain first, then fallback to config
-        self.api_key = None
-        try:
-            self.api_key = keyring.get_password("ephesoft-copilot", "GEMINI_API_KEY")
-        except Exception as e:
-            logger.warning(f"Failed to read from keyring: {e}")
-            
-        if not self.api_key:
-            self.api_key = config.get("GEMINI_API_KEY")
-            
-        if not self.api_key:
-            logger.warning("GEMINI_API_KEY not found in keyring or config.json")
+        if self.api_key:
+            try:
+                configure_gemini(self.api_key)
+            except ValueError as e:
+                logger.error(str(e))
+                self.api_key = None
         else:
-            genai.configure(api_key=self.api_key)
+            logger.warning("GEMINI_API_KEY not found (env, keychain, or config.json)")
             
-        # Use gemini-1.5-pro for complex HTML reasoning
-        self.model_name = 'gemini-1.5-pro'
-        self.model = genai.GenerativeModel(self.model_name)
+        self.model_name = config.get("GEMINI_MODEL", "gemini-1.5-flash")
+        self.model = genai.GenerativeModel(self.model_name) if self.api_key else None
     
     async def resolve(self, description: str, page_html: str) -> str:
         """
@@ -71,8 +66,8 @@ class OpenClawClient:
         Returns:
             A valid CSS selector string
         """
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY is not configured. Cannot resolve elements.")
+        if not self.api_key or not self.model:
+            validate_gemini_api_key("")
             
         # Clean and trim HTML to focus on relevant elements and stay within token budget
         cleaned = clean_html(page_html)
@@ -105,5 +100,11 @@ HTML:
             return selector
             
         except Exception as e:
+            err = str(e)
             logger.error(f"OpenClaw resolution failed for '{description}': {e}")
-            raise RuntimeError(f"OpenClaw failed to resolve element: {e}")
+            if "401" in err or "ACCESS_TOKEN" in err:
+                raise RuntimeError(
+                    "Gemini authentication failed (401). Fix GEMINI_API_KEY — see "
+                    "https://aistudio.google.com/apikey"
+                ) from e
+            raise RuntimeError(f"OpenClaw failed to resolve element: {e}") from e

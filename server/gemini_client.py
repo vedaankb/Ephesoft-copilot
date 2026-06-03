@@ -11,11 +11,11 @@ import logging
 import base64
 import json
 import re
-import keyring
 from typing import Dict, Any, List, Optional
 import google.generativeai as genai
 
 from server.tools import Action, ActionName
+from server.credentials import load_gemini_api_key, validate_gemini_api_key, configure_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -25,25 +25,19 @@ class GeminiClient:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self.api_key = load_gemini_api_key(config)
         
-        # Try to load API key from OS keychain first, then fallback to config
-        self.api_key = None
-        try:
-            self.api_key = keyring.get_password("ephesoft-copilot", "GEMINI_API_KEY")
-        except Exception as e:
-            logger.warning(f"Failed to read from keyring: {e}")
-            
-        if not self.api_key:
-            self.api_key = config.get("GEMINI_API_KEY")
-            
-        if not self.api_key:
-            logger.warning("GEMINI_API_KEY not found in keyring or config.json")
+        if self.api_key:
+            try:
+                configure_gemini(self.api_key)
+            except ValueError as e:
+                logger.error(str(e))
+                self.api_key = None
         else:
-            genai.configure(api_key=self.api_key)
+            logger.warning("GEMINI_API_KEY not found (env, keychain, or config.json)")
             
-        # Use gemini-1.5-pro for multimodal vision and complex reasoning
-        self.model_name = 'gemini-1.5-pro'
-        self.model = genai.GenerativeModel(self.model_name)
+        self.model_name = config.get("GEMINI_MODEL", "gemini-1.5-flash")
+        self.model = genai.GenerativeModel(self.model_name) if self.api_key else None
     
     def _load_prompt(self, path: str) -> str:
         """Load prompt file."""
@@ -77,8 +71,8 @@ class GeminiClient:
         Returns:
             Extraction dict with doc_type, fields, line_items, tax, flags
         """
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY is not configured. Cannot perform extraction.")
+        if not self.api_key or not self.model:
+            validate_gemini_api_key("")  # raises with setup instructions
             
         logger.info("Extracting data with Gemini 1.5 Pro...")
         
@@ -165,8 +159,15 @@ Ensure all SOP rules are strictly followed:
             return extraction
             
         except Exception as e:
+            err = str(e)
             logger.error(f"Gemini extraction failed: {e}")
-            raise RuntimeError(f"Gemini extraction failed: {e}")
+            if "401" in err or "ACCESS_TOKEN" in err or "authentication" in err.lower():
+                raise RuntimeError(
+                    "Gemini authentication failed (401). Your API key is missing or invalid. "
+                    "Create a key at https://aistudio.google.com/apikey (starts with AIza), "
+                    "then add it to config.json or re-run: .venv/bin/python setup.py"
+                ) from e
+            raise RuntimeError(f"Gemini extraction failed: {e}") from e
     
     async def plan_actions(self, extraction: Dict[str, Any]) -> List[Action]:
         """
@@ -232,8 +233,8 @@ Ensure all SOP rules are strictly followed:
         Returns:
             Dict with ok, red_fields[], notes
         """
-        if not self.api_key:
-            raise ValueError("GEMINI_API_KEY is not configured. Cannot perform verification.")
+        if not self.api_key or not self.model:
+            validate_gemini_api_key("")
             
         logger.info("Verifying filled fields with Gemini 1.5 Pro...")
         

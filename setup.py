@@ -30,20 +30,24 @@ def setup_keyring():
         sys.exit(1)
     
     # Gemini API key
-    print("Gemini API Key:")
-    print("Get yours at: https://makersuite.google.com/app/apikey")
-    gemini_key = getpass("Enter Gemini API key (hidden): ")
+    print("Gemini API Key (Google AI Studio — must start with AIza):")
+    print("Create one at: https://aistudio.google.com/apikey")
+    gemini_key = getpass("Enter Gemini API key (hidden): ").strip()
     
     if gemini_key:
+        if not gemini_key.startswith("AIza"):
+            print("⚠ Warning: Key should start with 'AIza'. Wrong keys cause 401 errors.")
         keyring.set_password("ephesoft-copilot", "GEMINI_API_KEY", gemini_key)
         print("✓ Gemini API key stored in keychain")
+        return gemini_key
     else:
-        print("⚠ No Gemini API key provided - you'll need to set it in config.json")
+        print("⚠ No Gemini API key provided - add to config.json before using Fill")
     
     print()
+    return None
 
 
-def create_config():
+def create_config(gemini_key=None):
     """Create config.json from user input."""
     print("\n" + "=" * 50)
     print("Configuration")
@@ -66,6 +70,10 @@ def create_config():
     mock_mode = input("Enable mock mode? (y/N): ").strip().lower()
     config["MOCK"] = mock_mode == 'y'
     
+    # Also store key in config.json (gitignored) as reliable fallback for keychain issues
+    if gemini_key:
+        config["GEMINI_API_KEY"] = gemini_key
+
     # Write config.json
     config_path = Path.cwd() / "config.json"
     with open(config_path, 'w') as f:
@@ -132,8 +140,8 @@ def main():
         sys.exit(0)
     
     # Run setup steps
-    setup_keyring()
-    create_config()
+    gemini_key = setup_keyring()
+    create_config(gemini_key=gemini_key)
     
     # Ask about fixture capture
     capture = input("Capture fixtures now? (y/N): ").strip().lower()
@@ -146,8 +154,10 @@ def main():
     print("=" * 50)
     print()
     print("Next steps:")
-    print("1. Install Playwright browsers: playwright install chromium")
-    print("2. Run the app: python run.py")
+    print("1. Install Playwright browsers:")
+    print("   .venv/bin/python -m playwright install chromium")
+    print("2. Run the app:")
+    print("   .venv/bin/python run.py")
     print()
 
 

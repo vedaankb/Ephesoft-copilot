@@ -11,22 +11,34 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const http = require('http');
 
 let mainWindow;
 let serverProcess;
+
+function getPythonBin() {
+    return process.platform === 'win32'
+        ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
+        : path.join(__dirname, '..', '.venv', 'bin', 'python');
+}
 
 // Spawn FastAPI server
 function startServer() {
     console.log('Starting FastAPI server...');
     
-    const pythonBin = process.platform === 'win32'
-        ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
-        : path.join(__dirname, '..', '.venv', 'bin', 'python');
+    const pythonBin = getPythonBin();
+    const fs = require('fs');
+    if (!fs.existsSync(pythonBin)) {
+        console.error(`Python not found at ${pythonBin}`);
+        console.error('Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt');
+        return;
+    }
         
-    serverProcess = spawn(pythonBin, ['-m', 'uvicorn', 'server.main:app', '--host', '127.0.0.1', '--port', '8000'], {
-        cwd: path.join(__dirname, '..'),
-        stdio: 'inherit'
-    });
+    serverProcess = spawn(
+        pythonBin,
+        ['-m', 'uvicorn', 'server.main:app', '--host', '127.0.0.1', '--port', '8000'],
+        { cwd: path.join(__dirname, '..'), stdio: 'inherit' }
+    );
     
     serverProcess.on('error', (err) => {
         console.error('Failed to start server:', err);
@@ -36,7 +48,42 @@ function startServer() {
         console.log(`Server process exited with code ${code}`);
     });
     
-    console.log('FastAPI server started');
+    console.log('FastAPI server process spawned');
+}
+
+function waitForServer(maxMs = 30000, intervalMs = 500) {
+    return new Promise((resolve) => {
+        const start = Date.now();
+        
+        const poll = () => {
+            const req = http.get('http://127.0.0.1:8000/health', (res) => {
+                res.resume();
+                if (res.statusCode === 200) {
+                    console.log('Server health check OK');
+                    resolve(true);
+                    return;
+                }
+                retry();
+            });
+            
+            req.on('error', () => retry());
+            req.setTimeout(2000, () => {
+                req.destroy();
+                retry();
+            });
+        };
+        
+        const retry = () => {
+            if (Date.now() - start >= maxMs) {
+                console.warn('Server health check timed out — opening UI anyway (will retry WebSocket)');
+                resolve(false);
+                return;
+            }
+            setTimeout(poll, intervalMs);
+        };
+        
+        poll();
+    });
 }
 
 // Kill server process
@@ -63,10 +110,8 @@ function createWindow() {
         }
     });
     
-    // Load renderer
     mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
     
-    // Open DevTools in dev mode
     if (process.argv.includes('--dev')) {
         mainWindow.webContents.openDevTools();
     }
@@ -78,15 +123,10 @@ function createWindow() {
     console.log('Main window created');
 }
 
-// App lifecycle
-app.whenReady().then(() => {
-    // Start server first
+app.whenReady().then(async () => {
     startServer();
-    
-    // Wait 2 seconds for server to start, then create window
-    setTimeout(() => {
-        createWindow();
-    }, 2000);
+    await waitForServer();
+    createWindow();
     
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {

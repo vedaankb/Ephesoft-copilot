@@ -11,6 +11,9 @@ Handles:
 import logging
 import json
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -53,13 +56,12 @@ async def lifespan(app: FastAPI):
         logger.warning("config.json not found, using empty config")
         config = {}
         
-    # Initialize components
+    # Initialize components (Playwright starts on first Fill/Next — keeps /ws available quickly)
     browser = BrowserSession(config)
     gemini = GeminiClient(config)
     openclaw = OpenClawClient(config)
     
-    # Start browser session
-    await browser.start()
+    logger.info("Server ready (browser will launch on first Fill or Next)")
     
     yield
     
@@ -188,6 +190,8 @@ async def handle_fill(websocket: WebSocket, payload: dict):
     try:
         await ws_update({"type": "status", "message": "Starting fill operation..."})
         
+        await browser.ensure_started()
+        
         # Create action logger for this fill session
         action_logger = ActionLogger()
         
@@ -240,6 +244,8 @@ async def handle_next(websocket: WebSocket, payload: dict):
     
     try:
         await ws_update({"type": "status", "message": "Starting next batch operation..."})
+        
+        await browser.ensure_started()
         
         from server.agent import open_next_batch
         await open_next_batch(

@@ -44,42 +44,84 @@ function App() {
     const [isConnected, setIsConnected] = useState(false);
     
     const wsRef = useRef(null);
+    const reconnectTimerRef = useRef(null);
+    const mountedRef = useRef(true);
     
-    // WebSocket connection
+    const addStatusMessage = (message, type = 'info') => {
+        const timestamp = new Date().toLocaleTimeString();
+        setStatusFeed(prev => [...prev, { message, type, timestamp }]);
+    };
+    
+    // WebSocket connection with retry (server may still be starting Playwright)
     useEffect(() => {
+        mountedRef.current = true;
         const wsUrl = window.api.getWebSocketUrl();
-        console.log('Connecting to:', wsUrl);
+        let attempt = 0;
+        const maxAttempts = 60;
         
-        const ws = new WebSocket(wsUrl);
-        
-        ws.onopen = () => {
-            console.log('WebSocket connected');
-            setIsConnected(true);
-            addStatusMessage('Connected to server');
+        const connect = () => {
+            if (!mountedRef.current) return;
+            
+            console.log('Connecting to:', wsUrl, `(attempt ${attempt + 1})`);
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+            
+            ws.onopen = () => {
+                attempt = 0;
+                console.log('WebSocket connected');
+                setIsConnected(true);
+                setError(null);
+                if (state === STATE.ERROR) {
+                    setState(STATE.IDLE);
+                }
+                setStatusFeed(prev => {
+                    const hasConnected = prev.some(item => item.message === 'Connected to server');
+                    if (hasConnected) return prev;
+                    return [...prev, {
+                        message: 'Connected to server',
+                        type: 'success',
+                        timestamp: new Date().toLocaleTimeString()
+                    }];
+                });
+            };
+            
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                handleServerMessage(message);
+            };
+            
+            ws.onerror = () => {
+                console.error('WebSocket error');
+                setIsConnected(false);
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket closed');
+                setIsConnected(false);
+                wsRef.current = null;
+                
+                if (!mountedRef.current) return;
+                
+                if (attempt < maxAttempts) {
+                    attempt += 1;
+                    const delay = Math.min(1000 * attempt, 5000);
+                    reconnectTimerRef.current = setTimeout(connect, delay);
+                } else {
+                    setState(STATE.ERROR);
+                    setError('Cannot reach server at ws://127.0.0.1:8000. Is the backend running?');
+                }
+            };
         };
         
-        ws.onmessage = (event) => {
-            const message = JSON.parse(event.data);
-            handleServerMessage(message);
-        };
-        
-        ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            setIsConnected(false);
-            setState(STATE.ERROR);
-            setError('Connection error');
-        };
-        
-        ws.onclose = () => {
-            console.log('WebSocket closed');
-            setIsConnected(false);
-        };
-        
-        wsRef.current = ws;
+        connect();
         
         return () => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.close();
+            mountedRef.current = false;
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+            }
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.close();
             }
         };
     }, []);
@@ -137,11 +179,6 @@ function App() {
         }
     };
     
-    const addStatusMessage = (message, type = 'info') => {
-        const timestamp = new Date().toLocaleTimeString();
-        setStatusFeed(prev => [...prev, { message, type, timestamp }]);
-    };
-    
     const handleFillClick = () => {
         if (!isConnected) {
             alert('Not connected to server');
@@ -186,13 +223,20 @@ function App() {
         <div className="app">
             <header className="header">
                 <h1>Ephesoft Copilot</h1>
-                <div className={`status-indicator ${isConnected ? 'connected' : 'disconnected'}`}>
+                <div
+                    className={`status-indicator ${isConnected ? 'connected' : 'disconnected'}`}
+                    title={isConnected ? 'Connected to server' : 'Waiting for server — retrying…'}
+                >
                     {isConnected ? '●' : '○'}
                 </div>
             </header>
             
             <main className="main">
                 {/* Action buttons */}
+                {!isConnected && state !== STATE.ERROR && (
+                    <p className="connecting-hint">Connecting to server…</p>
+                )}
+                
                 {state === STATE.IDLE && (
                     <div className="button-group">
                         <button 

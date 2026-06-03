@@ -32,6 +32,13 @@ class BrowserSession:
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.mock_mode = config.get("MOCK", False)
+        self._started = False
+    
+    async def ensure_started(self):
+        """Start Playwright on first use so the API/WebSocket can accept connections immediately."""
+        if not self._started:
+            await self.start()
+            self._started = True
     
     async def start(self):
         """Initialize browser session."""
