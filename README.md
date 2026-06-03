@@ -1,95 +1,122 @@
 # Ephesoft Copilot
 
-Floating desktop tool that automates data entry in Ephesoft. Human always validates — tool never clicks Validate.
+Floating Electron panel + Chrome extension that watches whatever Ephesoft (or
+any document portal) page you're on, fills the fields with Gemini, and gets
+out of the way. **The human always validates.**
 
-## Features
+## Architecture (one-liner)
 
-- **Fill**: AI reads document and fills all fields using vision + browser automation
-- **Next**: Parse batch list, open oldest unassigned batch
-- **Safety-first**: Validate button is structurally blocked, closed tool schema
-- **Mock mode**: Develop against local fixtures without live portal access
+```
+Electron panel  ──/ws/panel──►  FastAPI ◄──/ws/extension──  Chrome MV3 extension
+                                   │
+                                   ├── Gemini 1.5 (extract / plan / verify)
+                                   └── OpenClaw  (NL description → CSS selector
+                                                  on whatever HTML is on the page)
+```
 
-## Quick Start
+Why both pieces:
 
-### 1. Install dependencies
+- The **extension** runs inside your real Chrome session, so it can act on the
+  Ephesoft tab you're already logged into. No second browser, no sandboxed
+  Playwright window, no separate auth.
+- The **Electron panel** is the human surface — Fill, Next, settings, status
+  feed. It never touches the DOM directly; it sends intents to the backend,
+  which routes a closed set of low-level commands to the extension.
+
+## Safety, briefly
+
+- **Closed tool schema** in `server/tools.py`: `set_document_type`, `fill_field`,
+  `clear_table`, `insert_table_row`, `take_screenshot`, `flag_incomplete`,
+  `report_complete`. Anything else is rejected before the DOM is touched.
+- **Same closed allowlist** is enforced again inside the extension service
+  worker, plus a label check that refuses to click anything labelled Validate
+  / Skip / Merge / Split.
+- The agent **never clicks Validate**. The human reviews what got filled and
+  decides.
+
+## Install (dev)
 
 ```bash
-# Python dependencies
-pip install -r requirements.txt
-playwright install chromium
-
-# Node dependencies
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 npm install
+.venv/bin/python setup.py        # creates a default config.json
 ```
 
-### 2. Configure
+Load the extension once:
 
-Copy example config and add your API keys:
+1. Open `chrome://extensions`
+2. Toggle **Developer mode** on
+3. **Load unpacked** → pick the `extension/` folder
+
+## Run
 
 ```bash
-cp config.example.json config.json
-# Edit config.json with your Gemini API key and Ephesoft URL
+.venv/bin/python run.py
 ```
 
-For production, credentials are stored in OS keychain via:
+That spawns FastAPI on `127.0.0.1:8000` and opens the Electron panel.
+
+In the panel:
+
+1. Click the gear icon, paste your Gemini API key from
+   <https://aistudio.google.com/apikey> (starts with `AIza`), click **Test
+   key**, then **Save**. Keys are stored in your OS keychain.
+2. The two header dots should both be green:
+   - `panel` — Electron ↔ FastAPI
+   - `ext`   — extension ↔ FastAPI
+3. Open the Ephesoft tab you want to work on (or for testing, navigate Chrome
+   to <http://127.0.0.1:8000/mock/batch_list>).
+4. Click **Next** to open the oldest available batch, then **Fill**.
+
+## Mock pages for end-to-end testing without real Ephesoft
+
+- `http://127.0.0.1:8000/mock/batch_list` — a few synthetic batches with
+  varying statuses and dates
+- `http://127.0.0.1:8000/mock/field_view` — a stand-in field view for Fill
+
+These intentionally do **not** match real Ephesoft markup pixel-for-pixel.
+The point of OpenClaw is that the system works against whatever HTML is on
+the page; the mocks are just enough to exercise the pipeline locally.
+
+## Tests
 
 ```bash
-python setup.py
+.venv/bin/python -m unittest tests/test_tools_openclaw.py -v
 ```
 
-### 3. Run
+Covers:
+- Blocked actions raise immediately with **zero** DOM events emitted
+- `fill_field` strips `$` and `,` from `net_total` / `invoice_total`
+- `clear_table` + `insert_table_row` round-trip
+- The extension channel itself rejects disallowed cmds before send
 
-```bash
-python run.py
+## Project structure
+
+```
+server/
+  main.py               FastAPI: /ws/panel, /ws/extension, /api/settings, /mock/*
+  extension_channel.py  Routes commands to the connected extension
+  tools.py              Closed tool schema + safe execute()
+  agent.py              fill_batch / open_next_batch loops
+  gemini_client.py      Vision extraction, action planning, post-fill verify
+  openclaw_client.py    NL description → CSS selector via Gemini
+  credentials.py        API key loading (env / keychain / config.json)
+  action_logger.py      Append-only per-batch audit log
+
+extension/              Chrome MV3 extension (manifest, service worker, popup)
+
+electron/               Electron main + renderer (React UI)
+prompts/                system.md, sop_rules.md, doc_types.md
+fixtures/               batch_list.html, field_view.html
+tests/                  unit tests with FakeChannel + FakeOpenClaw
 ```
 
-This starts the FastAPI server and launches the Electron panel.
+## SOP rules
 
-## Architecture
-
-- **Backend**: FastAPI + WebSocket for real-time status updates
-- **Browser**: Playwright persistent context (survives restarts)
-- **Vision**: Gemini 1.5 Pro Vision for document extraction
-- **Element resolution**: OpenClaw fallback when selectors fail
-- **Frontend**: Electron + React panel (always-on-top, 380x600)
-
-## Safety Guarantees
-
-1. **Validate is structurally blocked** - not in tool schema, cannot be called
-2. **Closed tool set** - only `set_document_type`, `fill_field`, `insert_table_row`, `clear_table`, `take_screenshot`, `flag_incomplete`, `report_complete`
-3. **No generic actions** - no `click`, `navigate`, `type_arbitrary`, `submit`
-4. **Verification mandatory** - agent screenshots and checks for red fields before reporting complete
-5. **Append-only audit log** - every action logged with timestamp, never modified
-
-## Mock Mode
-
-Set `"MOCK": true` in `config.json` to develop against local fixtures:
-
-```bash
-# Capture Ephesoft page with a batch open
-# Chrome → right-click → Save As → Webpage, Complete
-# Save to fixtures/field_view.html
-```
-
-All agent logic, Gemini calls, and tool execution run identically — only browser target changes.
-
-## Logs
-
-- `logs/actions/YYYY-MM-DD_HH-MM-SS.json` - action log per session
-- `logs/screenshots/before_*.png`, `after_*.png` - screenshots per batch
-- Logs are gitignored
-
-## Document Types
-
-- invoice
-- pharmacy
-- estimate
-- medical_records
-- claim_form
-- online_provider
-
-Classification and field extraction rules in `prompts/doc_types.md`.
-
-## Development
-
-See `SPEC.md` for full implementation details and phase breakdown.
+`prompts/sop_rules.md` merges the Wombat / IPG SOP (Petco→invoice, three incomplete
+reasons, line-item rules, claim+invoice handling, etc.) and is injected on every
+Gemini extract/verify call. `server/sop.py` post-processes extractions in code:
+amount sanitization, net/total check, $0 line drop, today's date default, and
+normalizing `incomplete_reason` to `Missing Invoice` | `Missing Information` |
+`Illegible Documents` only. Safety nets (no Validate, blocked tools) are unchanged.

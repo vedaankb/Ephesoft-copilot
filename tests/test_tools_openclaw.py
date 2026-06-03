@@ -1,150 +1,184 @@
 """
-Unit tests for tools.py and openclaw_client.py.
+Unit tests for the closed tool schema and OpenClaw resolution.
 
-Verifies:
-- Safety checks (BlockedActionError)
-- OpenClaw resolution logic
-- Tool execution against mock HTML using Playwright
+These tests exercise the same logical surface as the live system but use:
+  - a FakeChannel that records DOM commands instead of touching a real browser
+  - a FakeOpenClaw that returns predetermined selectors instead of calling Gemini
+
+Result: tests verify the safety guarantees and the action plumbing without
+requiring Playwright, Chrome, or a network.
 """
 
 import unittest
 import asyncio
-import os
 from pathlib import Path
-from playwright.async_api import async_playwright
 
-from server.tools import Action, ActionName, execute, BlockedActionError, ToolExecutionError
-from server.openclaw_client import OpenClawClient
+from server.tools import (
+    Action,
+    ActionName,
+    execute,
+    BlockedActionError,
+)
 
 
-class MockOpenClawClient:
-    """Mock OpenClaw client that returns pre-determined selectors for testing."""
-    
-    def __init__(self):
-        # Map descriptions to selectors in fixtures/field_view.html
-        self.selector_map = {
-            "dropdown menu for selecting document type": "#document_type_dropdown",
-            "input field for invoice_date": "#invoice_date",
-            "input field for invoice_number": "#invoice_number",
-            "input field for provider_name": "#provider_name",
-            "input field for pet_name": "#pet_name",
-            "input field for net_total": "#net_total",
-            "input field for invoice_total": "#invoice_total",
-            "button to delete all rows or clear table": "#table_delete_all_btn",
-            "button to add or insert a new line item row": "#table_insert_row_btn",
-            "the empty or newly added description input field in the line items table": ".table_row_description",
-            "the empty or newly added quantity input field in the line items table": ".table_row_qty",
-            "the empty or newly added unit cost input field in the line items table": ".table_row_unit_cost",
-        }
-    
+# ---------- fakes ----------
+
+class FakeChannel:
+    """In-process channel that records every DOM command sent."""
+
+    def __init__(self, html: str = "<html><body></body></html>"):
+        self.html = html
+        self.events = []   # list of (cmd, kwargs)
+        # internal state for assertions
+        self.values = {}        # selector -> filled value
+        self.selected = {}      # selector -> selected value
+        self.clicks = []
+        # track table rows for the insert/clear flow
+        self.rows = []          # each row is {description, qty, unit_cost}
+
+    async def get_html(self) -> str:
+        self.events.append(("get_html", {}))
+        return self.html
+
+    async def screenshot(self) -> str:
+        self.events.append(("screenshot", {}))
+        return ""  # base64 empty PNG is fine for tests
+
+    async def fill(self, selector: str, value: str):
+        self.events.append(("fill", {"selector": selector, "value": value}))
+        self.values[selector] = value
+        # rough simulation of a row being filled: stash by selector tag
+        if selector.endswith("description"):
+            self.rows.append({"description": value, "qty": "", "unit_cost": ""})
+        elif selector.endswith("qty") and self.rows:
+            self.rows[-1]["qty"] = value
+        elif selector.endswith("unit_cost") and self.rows:
+            self.rows[-1]["unit_cost"] = value
+
+    async def click(self, selector: str):
+        self.events.append(("click", {"selector": selector}))
+        self.clicks.append(selector)
+        if "delete_all" in selector or "clear" in selector:
+            self.rows.clear()
+
+    async def select(self, selector: str, value: str):
+        self.events.append(("select", {"selector": selector, "value": value}))
+        self.selected[selector] = value
+
+
+class FakeOpenClaw:
+    """Returns deterministic selectors based on the natural language description."""
+
+    DEFAULT_MAP = {
+        "dropdown menu for selecting document type": "#document_type_dropdown",
+        "input field for invoice_date": "#invoice_date",
+        "input field for invoice_number": "#invoice_number",
+        "input field for provider_name": "#provider_name",
+        "input field for pet_name": "#pet_name",
+        "input field for net_total": "#net_total",
+        "input field for invoice_total": "#invoice_total",
+        "button to delete all rows or clear the line items table": "#table_delete_all_btn",
+        "button to add or insert a new line item row": "#table_insert_row_btn",
+        "the most recently added empty description input in the line items table": ".row-description",
+        "the most recently added empty quantity input in the line items table": ".row-qty",
+        "the most recently added empty unit cost input in the line items table": ".row-unit_cost",
+    }
+
     async def resolve(self, description: str, page_html: str) -> str:
-        if description in self.selector_map:
-            return self.selector_map[description]
-        raise ValueError(f"MockOpenClaw: Unknown description '{description}'")
+        for key, sel in self.DEFAULT_MAP.items():
+            if key == description:
+                return sel
+        # Fall back to a marker selector so tests can see what was asked
+        return f"[data-unmapped='{description[:30]}']"
 
 
-class TestToolsAndOpenClaw(unittest.IsolatedAsyncioTestCase):
-    
-    async def asyncSetUp(self):
-        """Set up Playwright and open mock HTML."""
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=True)
-        self.context = await self.browser.new_context()
-        self.page = await self.context.new_page()
-        
-        # Load mock field view
-        fixture_path = Path.cwd() / "fixtures" / "field_view.html"
-        await self.page.goto(f"file://{fixture_path}")
-        
-        self.mock_openclaw = MockOpenClawClient()
-        
-    async def asyncTearDown(self):
-        """Clean up Playwright resources."""
-        await self.context.close()
-        await self.browser.close()
-        await self.playwright.stop()
-        
-    async def test_blocked_actions(self):
-        """Verify that blocked actions raise BlockedActionError immediately."""
-        blocked_actions = ["validate", "skip_batch", "merge_documents", "split_documents"]
-        
-        for action_name in blocked_actions:
-            action = Action(name=action_name, parameters={})
-            with self.assertRaises(BlockedActionError):
-                await execute(action, self.page, self.mock_openclaw)
-                
-    async def test_set_document_type(self):
-        """Verify set_document_type tool selects the correct option."""
-        action = Action(
-            name=ActionName.SET_DOCUMENT_TYPE,
-            parameters={"doc_type": "pharmacy"}
-        )
-        
-        result = await execute(action, self.page, self.mock_openclaw)
+# ---------- tests ----------
+
+class TestSafety(unittest.IsolatedAsyncioTestCase):
+
+    async def test_blocked_actions_raise_immediately(self):
+        channel = FakeChannel()
+        openclaw = FakeOpenClaw()
+        for blocked in ["validate", "skip_batch", "merge_documents", "split_documents",
+                        "click", "navigate", "type_arbitrary", "submit"]:
+            with self.subTest(action=blocked):
+                action = Action(name=blocked, parameters={})
+                with self.assertRaises(BlockedActionError):
+                    await execute(action, channel, openclaw)
+                # Critical: NO DOM command was ever sent for a blocked action
+                self.assertEqual(channel.events, [], f"{blocked} leaked DOM events!")
+
+    async def test_unknown_action_is_blocked(self):
+        channel = FakeChannel()
+        openclaw = FakeOpenClaw()
+        action = Action(name="set_validate_button", parameters={})
+        with self.assertRaises(BlockedActionError):
+            await execute(action, channel, openclaw)
+
+
+class TestFieldOps(unittest.IsolatedAsyncioTestCase):
+
+    async def test_set_document_type_uses_select(self):
+        channel = FakeChannel()
+        openclaw = FakeOpenClaw()
+        action = Action(name=ActionName.SET_DOCUMENT_TYPE, parameters={"doc_type": "pharmacy"})
+        await execute(action, channel, openclaw)
+        self.assertEqual(channel.selected["#document_type_dropdown"], "pharmacy")
         self.assertTrue(action.success)
-        self.assertEqual(result["value"], "pharmacy")
-        
-        # Verify on page
-        selected_val = await self.page.eval_on_selector("#document_type_dropdown", "el => el.value")
-        self.assertEqual(selected_val, "pharmacy")
-        
-    async def test_fill_field(self):
-        """Verify fill_field tool fills inputs correctly and strips formatting."""
-        # Test filling date
-        action_date = Action(
-            name=ActionName.FILL_FIELD,
-            parameters={"field_name": "invoice_date", "value": "03/15/2024"}
+
+    async def test_fill_field_strips_currency_and_commas_for_amounts(self):
+        channel = FakeChannel()
+        openclaw = FakeOpenClaw()
+
+        a1 = Action(name=ActionName.FILL_FIELD, parameters={"field_name": "invoice_date", "value": "03/15/2024"})
+        a2 = Action(name=ActionName.FILL_FIELD, parameters={"field_name": "net_total", "value": "$1,127.50"})
+        a3 = Action(name=ActionName.FILL_FIELD, parameters={"field_name": "invoice_total", "value": "$1,250.00"})
+
+        await execute(a1, channel, openclaw)
+        await execute(a2, channel, openclaw)
+        await execute(a3, channel, openclaw)
+
+        self.assertEqual(channel.values["#invoice_date"], "03/15/2024")
+        self.assertEqual(channel.values["#net_total"], "1127.50")
+        self.assertEqual(channel.values["#invoice_total"], "1250.00")
+
+
+class TestTableOps(unittest.IsolatedAsyncioTestCase):
+
+    async def test_clear_then_insert_row_strips_currency(self):
+        channel = FakeChannel()
+        openclaw = FakeOpenClaw()
+
+        await execute(Action(name=ActionName.CLEAR_TABLE, parameters={}), channel, openclaw)
+        self.assertIn("#table_delete_all_btn", channel.clicks)
+
+        await execute(
+            Action(
+                name=ActionName.INSERT_TABLE_ROW,
+                parameters={"description": "Exam fee", "qty": "1", "unit_cost": "$65.00"},
+            ),
+            channel,
+            openclaw,
         )
-        await execute(action_date, self.page, self.mock_openclaw)
-        self.assertTrue(action_date.success)
-        
-        date_val = await self.page.eval_on_selector("#invoice_date", "el => el.value")
-        self.assertEqual(date_val, "03/15/2024")
-        
-        # Test filling net_total with formatting (should strip $ and commas)
-        action_total = Action(
-            name=ActionName.FILL_FIELD,
-            parameters={"field_name": "net_total", "value": "$1,127.50"}
-        )
-        await execute(action_total, self.page, self.mock_openclaw)
-        self.assertTrue(action_total.success)
-        
-        total_val = await self.page.eval_on_selector("#net_total", "el => el.value")
-        self.assertEqual(total_val, "1127.50")
-        
-    async def test_table_operations(self):
-        """Verify clear_table and insert_table_row tools."""
-        # 1. Insert row
-        action_insert = Action(
-            name=ActionName.INSERT_TABLE_ROW,
-            parameters={
-                "description": "Consultation",
-                "qty": "1",
-                "unit_cost": "$65.00"
-            }
-        )
-        await execute(action_insert, self.page, self.mock_openclaw)
-        self.assertTrue(action_insert.success)
-        
-        # Verify row was added
-        rows_count = await self.page.locator("#line_items_tbody tr").count()
-        self.assertEqual(rows_count, 1)
-        
-        desc_val = await self.page.locator(".table_row_description").first.input_value()
-        qty_val = await self.page.locator(".table_row_qty").first.input_value()
-        cost_val = await self.page.locator(".table_row_unit_cost").first.input_value()
-        
-        self.assertEqual(desc_val, "Consultation")
-        self.assertEqual(qty_val, "1")
-        self.assertEqual(cost_val, "65.00")
-        
-        # 2. Clear table
-        action_clear = Action(name=ActionName.CLEAR_TABLE, parameters={})
-        await execute(action_clear, self.page, self.mock_openclaw)
-        self.assertTrue(action_clear.success)
-        
-        rows_count_after = await self.page.locator("#line_items_tbody tr").count()
-        self.assertEqual(rows_count_after, 0)
+
+        self.assertIn("#table_insert_row_btn", channel.clicks)
+        self.assertEqual(len(channel.rows), 1)
+        row = channel.rows[0]
+        self.assertEqual(row["description"], "Exam fee")
+        self.assertEqual(row["qty"], "1")
+        self.assertEqual(row["unit_cost"], "65.00")  # stripped
+
+
+class TestExtensionChannelAllowlist(unittest.IsolatedAsyncioTestCase):
+    """Defense in depth: the channel itself must reject disallowed cmds."""
+
+    async def test_disallowed_cmd_rejected(self):
+        from server.extension_channel import ExtensionChannel
+        ch = ExtensionChannel()
+        with self.assertRaises(ValueError):
+            await ch._send_cmd("validate")
+        with self.assertRaises(ValueError):
+            await ch._send_cmd("navigate", url="https://example.com")
 
 
 if __name__ == "__main__":

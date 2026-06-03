@@ -16,6 +16,7 @@ import google.generativeai as genai
 
 from server.tools import Action, ActionName
 from server.credentials import load_gemini_api_key, validate_gemini_api_key, configure_gemini
+from server.sop import apply_sop_post_processing, should_stop_fill
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class GeminiClient:
             return ""
             
     def build_system_prompt(self) -> str:
-        """Assemble system prompt from system, sop_rules, and doc_types prompts."""
+        """Assemble system prompt: agent instructions + Wombat SOP + doc type reference."""
         return "\n\n".join([
             self._load_prompt("prompts/system.md"),
             self._load_prompt("prompts/sop_rules.md"),
@@ -107,10 +108,10 @@ class GeminiClient:
             parts.append("This is the document to extract data from.")
             
         # 4. Request JSON response matching extraction schema
-        parts.append("""Please analyze the document and the Ephesoft portal screenshot, and extract the required fields as specified in the SOP rules.
-Return ONLY a valid JSON object matching the following schema:
+        parts.append("""Analyze the document and Ephesoft screenshot per the SOP (Wombat / IPG).
+Return ONLY valid JSON matching this schema:
 {
-  "doc_type": "invoice|pharmacy|estimate|medical_records|claim_form|online_provider",
+  "doc_type": "invoice|pharmacy|estimate|medical_records|claim_form|online_provider|incomplete",
   "confidence": 94,
   "fields": {
     "invoice_date": "YYYY-MM-DD",
@@ -120,20 +121,23 @@ Return ONLY a valid JSON object matching the following schema:
     "net_total": "117.29",
     "invoice_total": "127.98"
   },
-  "line_items": [
-    {"description": "Exam fee", "qty": "1", "unit_cost": "65.00"}
-  ],
+  "line_items": [{"description": "Exam fee", "qty": "1", "unit_cost": "65.00"}],
   "tax": {"present": true, "amount": "10.69"},
   "flags": [],
   "incomplete_reason": null
 }
 
-Ensure all SOP rules are strictly followed:
-- net_total must be less than invoice_total. If not, set "incomplete_reason" to "net_total is not less than invoice_total" and add "MISSING_INVOICE_TOTAL" to flags.
-- Strip all $ signs and commas from amounts.
-- Dates must be numeric format only.
-- If no invoice number is found, use Rx number or order number and add "NO_INVOICE_NUMBER" to flags.
-- If any safety flags are triggered (e.g., ILLEGIBLE, COMBINED_DOC, MULTI_PET, NEGATIVE_LINE_ITEMS, ESTIMATE), add them to the "flags" list. If the document cannot be processed, set "incomplete_reason" to the reason why.
+Critical SOP reminders:
+- Petco/Vetco receipts → doc_type invoice (not pharmacy). Treatment plan / open invoice → invoice.
+- Claim form + invoice on one image → invoice (invoice fields only); NOT COMBINED_DOC.
+- Two separate invoices on one image → flag COMBINED_DOC, incomplete_reason "Missing Information".
+- incomplete_reason must be EXACTLY one of: "Missing Invoice", "Missing Information", "Illegible Documents" — or null if fill can proceed.
+- net_total = invoice_total minus all taxes; must be < invoice_total when tax exists; never negative totals.
+- Omit $0 line items; default qty to 1; use "your fee" column when present.
+- Strip $ and commas from all amounts in JSON.
+- Missing invoice_date on document → use today's date.
+- Rx/order as invoice_number → flag NO_INVOICE_NUMBER.
+- Warning flags only in "flags"; use incomplete_reason when auto-fill must stop.
 """)
 
         try:
@@ -151,11 +155,15 @@ Ensure all SOP rules are strictly followed:
                 text = text.strip()
                 
             extraction = json.loads(text)
-            
-            # Validate extraction schema
+
             self.validate_extraction_schema(extraction)
-            
-            logger.info(f"Extraction successful: {extraction.get('doc_type')} with confidence {extraction.get('confidence')}%")
+            apply_sop_post_processing(extraction)
+
+            logger.info(
+                f"Extraction successful: {extraction.get('doc_type')} "
+                f"({extraction.get('confidence')}%)"
+                + (f" incomplete={extraction.get('incomplete_reason')}" if extraction.get("incomplete_reason") else "")
+            )
             return extraction
             
         except Exception as e:
@@ -179,6 +187,10 @@ Ensure all SOP rules are strictly followed:
         Returns:
             List of Action objects
         """
+        if should_stop_fill(extraction):
+            logger.info("SOP: skipping plan_actions — batch marked incomplete")
+            return []
+
         actions = []
         
         # 1. Set document type
@@ -296,25 +308,5 @@ If any fields are highlighted in red or show error/validation messages, list the
         for key in required_keys:
             if key not in extraction:
                 raise ValueError(f"Missing required key in extraction: {key}")
-        
-        # Validate net_total < invoice_total if both present
-        fields = extraction.get("fields", {})
-        if "net_total" in fields and "invoice_total" in fields:
-            try:
-                net = float(fields["net_total"].replace("$", "").replace(",", ""))
-                total = float(fields["invoice_total"].replace("$", "").replace(",", ""))
-                
-                if net >= total:
-                    logger.warning(
-                        f"net_total ({net}) should be less than invoice_total ({total})"
-                    )
-                    # Force flag if net_total >= invoice_total
-                    if "flags" not in extraction:
-                        extraction["flags"] = []
-                    if "MISSING_INVOICE_TOTAL" not in extraction["flags"]:
-                        extraction["flags"].append("MISSING_INVOICE_TOTAL")
-                    extraction["incomplete_reason"] = f"net_total ({net}) must be less than invoice_total ({total})"
-            except ValueError:
-                logger.warning("Could not parse amounts for validation")
-        
+
         return True

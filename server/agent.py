@@ -14,17 +14,18 @@ import asyncio
 from datetime import datetime
 
 from server.tools import Action, execute, BlockedActionError, ToolExecutionError
+from server.sop import should_stop_fill
 
 logger = logging.getLogger(__name__)
 
 
 async def fill_batch(
-    browser_session,
+    channel,
     gemini_client,
     openclaw_client,
     config: Dict[str, Any],
     ws_update_callback: Callable,
-    action_logger
+    action_logger,
 ) -> Dict[str, Any]:
     """
     Fill loop - main agent orchestration for Fill button.
@@ -40,13 +41,15 @@ async def fill_batch(
     """
     
     try:
-        # 1. Take initial screenshot
+        # 1. Take initial screenshot via the extension
         await ws_update_callback({"type": "status", "message": "Taking screenshot..."})
-        screenshot_b64 = await browser_session.screenshot()
-        
-        # 2. Fetch document raw bytes
-        await ws_update_callback({"type": "status", "message": "Fetching document..."})
-        doc_bytes = await browser_session.fetch_doc_bytes()
+        screenshot_b64 = await channel.screenshot()
+
+        # 2. Document bytes — for now we extract from the screenshot only.
+        # When we know how Ephesoft serves the doc PDF, we'll fetch it via the
+        # extension. Sending an empty bytes string here is fine; the screenshot
+        # is the primary source for extraction.
+        doc_bytes = b""
         
         # 3. Extract data via Gemini Vision
         await ws_update_callback({"type": "status", "message": "Extracting data with Gemini..."})
@@ -77,11 +80,12 @@ async def fill_batch(
                 "message": f"Flags triggered: {', '.join(flags)}"
             })
         
-        # If flagged incomplete during extraction, stop here
-        if extraction.get("incomplete_reason"):
+        # SOP: stop before any DOM fill when incomplete (three Wombat reasons or doc_type incomplete)
+        if should_stop_fill(extraction):
+            reason = extraction.get("incomplete_reason") or "Missing Information"
             await ws_update_callback({
                 "type": "incomplete",
-                "reason": extraction["incomplete_reason"],
+                "reason": reason,
                 "flags": flags
             })
             
@@ -92,7 +96,7 @@ async def fill_batch(
             
             return {
                 "status": "incomplete",
-                "reason": extraction["incomplete_reason"],
+                "reason": reason,
                 "flags": flags
             }
         
@@ -128,9 +132,9 @@ async def fill_batch(
                 # Execute action using OpenClaw resolution inside tools.py
                 await execute(
                     action=action,
-                    page=browser_session.page,
+                    channel=channel,
                     openclaw=openclaw_client,
-                    ws_update_callback=ws_update_callback
+                    ws_update_callback=ws_update_callback,
                 )
                 
                 # Log action
@@ -152,7 +156,7 @@ async def fill_batch(
         
         # 6. Post-fill screenshot
         await ws_update_callback({"type": "status", "message": "Verifying filled fields..."})
-        post_screenshot = await browser_session.screenshot()
+        post_screenshot = await channel.screenshot()
         
         # 7. Verification pass
         verification = await gemini_client.verify(post_screenshot)
@@ -193,31 +197,26 @@ async def fill_batch(
 
 
 async def open_next_batch(
-    browser_session,
+    channel,
     openclaw_client,
     config: Dict[str, Any],
-    ws_update_callback: Callable
+    ws_update_callback: Callable,
 ) -> Dict[str, Any]:
     """
-    Next loop - open oldest unassigned batch.
-    
+    Next loop — assumes the user is already on the batch list page in their tab.
+
     Flow:
-    1. Navigate to batch list view
-    2. Parse all visible batches using Gemini
-    3. Filter: status != "in_progress" AND assigned_to == null
+    1. Read the page HTML via the extension
+    2. Ask Gemini to extract structured batches from it
+    3. Filter to status != "in_progress" AND assigned_to == null
     4. Sort by created_at ASC (oldest first)
-    5. Click top result using OpenClaw
+    5. Use OpenClaw to find a click target for the top batch and click it
     6. Report opened batch
     """
-    
+
     try:
-        # 1. Navigate to batch list
-        await ws_update_callback({"type": "status", "message": "Loading batch list..."})
-        await browser_session.navigate_to_batch_list()
-        
-        # 2. Parse visible batches
-        await ws_update_callback({"type": "status", "message": "Parsing batches..."})
-        batches = await browser_session.parse_batch_list(openclaw_client)
+        await ws_update_callback({"type": "status", "message": "Reading batch list from page..."})
+        batches = await channel.parse_batch_list(openclaw_client)
         
         # 3. Filter
         available_batches = [
@@ -247,7 +246,7 @@ async def open_next_batch(
             "message": f"Opening batch {batch_id}..."
         })
         
-        await browser_session.open_batch(batch_id, openclaw_client)
+        await channel.open_batch(batch_id, openclaw_client)
         
         # 6. Report success
         await ws_update_callback({

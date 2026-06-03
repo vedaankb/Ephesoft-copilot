@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
-playwright
 google-generativeai
 keyring
 python-dotenv
+pydantic

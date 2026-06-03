@@ -11,7 +11,7 @@ const { contextBridge } = require('electron');
 contextBridge.exposeInMainWorld('api', {
     // Connection helpers
     getWebSocketUrl: () => {
-        return 'ws://127.0.0.1:8000/ws';
+        return 'ws://127.0.0.1:8000/ws/panel';
     },
     
     // Utility

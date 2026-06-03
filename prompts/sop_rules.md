@@ -1,74 +1,160 @@
-# Standard Operating Procedure (SOP) Rules for Ephesoft Document Processing
+# Ephesoft Copilot SOP — Wombat / Independence Pet Group
 
-These rules govern how all document fields, line items, and document types must be parsed, validated, and processed. These rules are non-negotiable and must be strictly adhered to by the extraction engine.
-
-## 1. Document Classification Rules
-
-Every document must be classified into one of the following six categories:
-- **invoice**: Itemized list of services/products, dollar amounts per line, provider letterhead, subtotal, tax, and total.
-- **pharmacy**: Prescription (Rx) number, NDC codes, drug names, dispensing pharmacy header, dosage info.
-- **estimate**: "Estimate", "Quote", "Draft", or "Proposed" text. Quoted/estimated costs rather than final billed amounts.
-- **medical_records**: Clinical notes, SOAP notes, diagnosis codes (ICD), physician/veterinarian signature, clinical observations. Minimal or no billing information.
-- **claim_form**: Pre-printed insurance claim form layout (e.g., IPG/Hartville), policy number field, claimant details.
-- **online_provider**: Online pharmacy or retailer order confirmation (e.g., Chewy, Amazon Pet), order number, ship-to address, digital receipt layout.
+Authoritative rules for extraction and fill planning. The human always validates in Ephesoft;
+this agent never clicks Validate. When processing must stop, use **only** the three
+`incomplete_reason` values in section 5.
 
 ---
 
-## 2. Field-Level Parsing and Validation Rules
+## 1. Document type selection
 
-### 2.1 Invoice Date
-- **Format**: Must be numeric format only (MM/DD/YYYY or YYYY-MM-DD).
-- **Text Conversion**: Convert text dates to numeric. E.g., "March 15, 2024" must be converted to "03/15/2024" or "2024-03-15".
-- **Selection**: If multiple dates are present, prefer the invoice/service date over the payment due date or statement date.
+| Document on screen | Set `doc_type` to |
+|---|---|
+| Standard vet/provider invoice | `invoice` |
+| Pharmacy receipt / Rx slip | `pharmacy` |
+| Estimate or draft invoice | `estimate` |
+| Treatment plan | `invoice` |
+| Open invoice (not yet paid) | `invoice` |
+| Medical records / clinical notes | `medical_records` |
+| Online provider order confirmation | `online_provider` |
+| Petco / Vetco receipt | `invoice` — **NOT** `pharmacy` |
+| Claim form only (no invoice) | `incomplete` → reason `Missing Invoice` |
+| Payment slip only (no invoice) | `incomplete` → reason `Missing Invoice` |
 
-### 2.2 Invoice Number
-- **Priority Order**:
-  1. Invoice Number (if explicitly present)
-  2. Rx Number (for pharmacy receipts)
-  3. Order Number (for online provider receipts)
-  4. Reference Number or Statement Number
-  5. Any other unique identifier on the document
-- **No Invoice Number**: If no invoice number is found and an alternative (Rx/Order) is used, the extraction must be flagged with `NO_INVOICE_NUMBER`.
-- **Missing entirely**: If absolutely no unique number is present, flag with `MISSING_INVOICE_TOTAL` or `NO_INVOICE_NUMBER` as appropriate.
+Also supported types for classification reference: `claim_form` when a claim form is visible
+alongside an invoice (see combined documents below).
 
-### 2.3 Provider Name
-- **Extraction**: Extract the full business/clinic/hospital name.
-- **Exclusions**: Do NOT include the street address, phone number, or website in the provider name field.
-- **Inclusions**: Retain suffixes like "DVM", "Veterinary", "Animal Hospital", "Clinic" if they are part of the official business name.
+### Edge cases
 
-### 2.4 Pet Name
-- **Extraction**: Extract the pet/patient name exactly as written.
-- **Multiple Pets**: If multiple pets are listed on the same document, flag with `MULTI_PET`. The human must decide how to split the charges.
-
-### 2.5 Net Total and Invoice Total
-- **Definitions**:
-  - **invoice_total**: The final, absolute amount due/paid including all taxes, shipping, and fees.
-  - **net_total**: The subtotal/amount BEFORE taxes are applied.
-- **Formula**: `net_total = invoice_total - sum(all_taxes)`
-- **Validation**: `net_total` MUST be strictly less than `invoice_total` if taxes are present. If `net_total` is calculated or extracted as greater than or equal to `invoice_total`, flag the document and stop processing.
-- **Formatting**: Strip all currency symbols (`$`) and commas (`,`) from both net_total and invoice_total before writing. E.g., "$1,127.50" becomes "1127.50".
-
----
-
-## 3. Line Items and Tables
-
-- **Extraction**: Extract every line item with its description, quantity (qty), and unit cost.
-- **Formatting**: Unit cost must have currency symbols and commas stripped.
-- **Negative Line Items**:
-  - Include negative line items (discounts, credits, coupons) in the table if they are part of the subtotal calculation.
-  - Exclude post-subtotal discounts or payment credits (e.g., "Paid by Visa -$50.00").
-  - If negative line items are present, flag with `NEGATIVE_LINE_ITEMS`.
+- **Claim form + invoice on one image**: `doc_type` = `invoice`. Extract and fill invoice
+  fields only; ignore claim-form-only fields. Do **not** set `COMBINED_DOC` for this case.
+- **Two separate invoices on one image**: add flag `COMBINED_DOC`, set
+  `incomplete_reason` = `Missing Information` — human must split.
+- **Estimate / quote / draft**: `doc_type` = `estimate`, flag `ESTIMATE` (fill may proceed;
+  human reviews).
+- **Line items do not match claim**: `incomplete_reason` = `Missing Information`.
+- **Multi-pet invoice**: flag `MULTI_PET`. Use claim form page 1 to pick the claimed pet if
+  visible; line items for that pet only. If unsure which pet → `incomplete_reason` =
+  `Missing Information`.
+- **Pet name on invoice differs from claim**: use pet name from the **invoice**; expected
+  Ephesoft mismatch review.
+- **Pharmacy, no medication name**: `pharmacy`; line description = exactly what is on the
+  receipt (e.g. `RX 12345`).
+- **Partially obstructed / blurry**: if line items and totals are legible, process normally.
+  Only `Illegible Documents` when critical fields truly cannot be read.
 
 ---
 
-## 4. Safety and Flags (When to Stop or Warn)
+## 2. Field rules
 
-If any of the following conditions are met, the extraction must be flagged, and the panel must display a warning to the human:
+### Invoice date
 
-- **ILLEGIBLE**: The document or any critical section (dates, totals, line items) is blurry, cut off, or unreadable.
-- **COMBINED_DOC**: A claim form and an invoice/receipt are merged into a single image or document.
-- **MULTI_PET**: More than one pet name is found on the invoice.
-- **NEGATIVE_LINE_ITEMS**: Discounts or credits are present in the line items.
-- **NO_INVOICE_NUMBER**: No traditional invoice number was found, and an Rx/Order number is being used instead.
-- **ESTIMATE**: The document is a draft, quote, or estimate, not a final invoice.
-- **MISSING_INVOICE_TOTAL**: The final invoice total cannot be found or is missing from the document.
+- Numeric only: `MM/DD/YYYY` or `YYYY-MM-DD` (convert text dates, e.g. March 15, 2024 →
+  `03/15/2024`).
+- Prefer service/invoice date over due date or statement date.
+- **If missing on document**: use today's date (UTC date when extracting).
+
+### Invoice number (priority)
+
+1. Invoice number  
+2. Rx number (pharmacy)  
+3. Order number (online provider)  
+4. Reference / statement number  
+5. Any other unique identifier  
+
+If using Rx/order instead of invoice number → flag `NO_INVOICE_NUMBER`.
+
+### Provider name
+
+- Business/clinic name only — no street, phone, or website in this field.
+- Keep suffixes like DVM, Veterinary, Animal Hospital, Clinic when part of the official name.
+
+### Pet name
+
+- Exactly as written on the invoice.
+- Multiple pets → flag `MULTI_PET` (see edge cases).
+
+### Amounts (`net_total`, `invoice_total`, line `unit_cost`)
+
+- **invoice_total**: final amount due/paid including tax, shipping, fees.
+- **net_total**: subtotal **before** tax (`invoice_total − sum(all taxes)`).
+- If multiple tax lines: sum all taxes first, then subtract from invoice_total.
+- Enter tax in the dedicated tax field separately; do not include tax in `net_total`.
+- Strip all `$`, commas, and stray `S`/`5` used as dollar markers before values are returned.
+- **Never** negative values in `net_total` or `invoice_total`.
+- If tax is present, `net_total` must be **strictly less than** `invoice_total`; otherwise
+  set `incomplete_reason` = `Missing Information` and flag `MISSING_INVOICE_TOTAL`.
+
+Examples: invoice_total 123.98, tax 10.69 → net_total 113.29.
+
+---
+
+## 3. Line item table
+
+### Include
+
+- All line items with a **non-zero** charge.
+- If qty absent → `qty` = `1`.
+- "Regular fee" vs "your fee" columns → use **your fee** (amount owner paid).
+- Discount **within** a line → enter discounted price.
+- Negative amounts **in the subtotal** → include in table; flag `NEGATIVE_LINE_ITEMS`.
+
+### Exclude
+
+- $0 charge lines — do not return them in `line_items`.
+- Post-subtotal discounts / payment credits (e.g. "Paid by Visa -$50") — not line items.
+
+### Data quality
+
+- Watch missing decimals (1500 vs 15.00).
+- Two invoices as one document → `COMBINED_DOC` + stop (section 5).
+
+---
+
+## 4. Warning flags (do not stop fill unless section 5 applies)
+
+Add to `flags` when true (human sees warnings on the panel):
+
+| Flag | When |
+|---|---|
+| `ILLEGIBLE` | Critical sections unreadable (usually becomes incomplete — section 5) |
+| `COMBINED_DOC` | Two invoices need splitting (must stop — section 5) |
+| `MULTI_PET` | Multiple pets on invoice |
+| `NEGATIVE_LINE_ITEMS` | In-subtotal discounts/credits in table |
+| `NO_INVOICE_NUMBER` | Using Rx/order/reference instead of invoice # |
+| `ESTIMATE` | Draft/quote/estimate document |
+| `MISSING_INVOICE_TOTAL` | Total missing or net/total relationship invalid |
+
+---
+
+## 5. Incomplete — stop fill (three reasons only)
+
+When the batch cannot be auto-filled, set `incomplete_reason` to **exactly one** of:
+
+| `incomplete_reason` | Use when |
+|---|---|
+| `Missing Invoice` | No invoice — only claim form, payment slip, or empty |
+| `Missing Information` | Invoice present but required fields unknown, COMBINED_DOC (two invoices), multi-pet unresolved, line/claim mismatch, invalid totals |
+| `Illegible Documents` | Document completely unreadable |
+
+Do **not** use any other incomplete reason string. Set `doc_type` to `incomplete` when stopping
+for missing invoice; otherwise keep the best matching type and rely on `incomplete_reason`.
+
+Also set `incomplete_reason` when flags imply stop: `COMBINED_DOC` (two invoices), unresolved
+`MULTI_PET`, or `ILLEGIBLE` with no readable totals/line items.
+
+---
+
+## 6. Scenarios quick reference
+
+| Scenario | Action |
+|---|---|
+| Treatment plan | `invoice`, fill normally |
+| Open invoice | `invoice`, fill normally |
+| Petco / Vetco | `invoice` |
+| Claim + invoice combined | `invoice`, invoice fields only |
+| Payment slip only | `incomplete`, `Missing Invoice` |
+| Two invoices one file | `COMBINED_DOC`, `Missing Information` |
+| Invoice date missing | today's date in `invoice_date` |
+| Discount after subtotal | omit from `line_items` |
+| Insured items to skip | omit those lines; fill the rest |

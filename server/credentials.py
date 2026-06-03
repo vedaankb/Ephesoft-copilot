@@ -92,3 +92,42 @@ def configure_gemini(api_key: str):
     import google.generativeai as genai
     validate_gemini_api_key(api_key)
     genai.configure(api_key=api_key)
+
+
+def save_gemini_api_key(api_key: str) -> None:
+    """Persist API key to OS keychain (raises if invalid)."""
+    api_key = (api_key or "").strip()
+    validate_gemini_api_key(api_key)
+    import keyring
+    keyring.set_password(KEYRING_SERVICE, KEYRING_USERNAME, api_key)
+    logger.info("Saved Gemini API key to keychain")
+
+
+def clear_gemini_api_key() -> None:
+    """Remove API key from keychain (no error if missing)."""
+    try:
+        import keyring
+        keyring.delete_password(KEYRING_SERVICE, KEYRING_USERNAME)
+        logger.info("Cleared Gemini API key from keychain")
+    except Exception as e:
+        logger.warning(f"Could not clear keychain: {e}")
+
+
+async def test_gemini_api_key(api_key: str) -> dict:
+    """Make a tiny call to verify the key works. Returns {ok, message}."""
+    import google.generativeai as genai
+    try:
+        validate_gemini_api_key(api_key)
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        response = await model.generate_content_async("Reply with: ok")
+        text = (response.text or "").strip()
+        return {"ok": True, "message": f"Key works (model replied: {text[:40]})"}
+    except Exception as e:
+        err = str(e)
+        if "401" in err or "ACCESS_TOKEN" in err or "authentication" in err.lower():
+            return {"ok": False, "message": "401: key was rejected by Google. Create a fresh key at https://aistudio.google.com/apikey"}
+        return {"ok": False, "message": f"API error: {err[:200]}"}

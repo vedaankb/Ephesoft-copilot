@@ -239,55 +239,46 @@ class Action:
 
 async def execute(
     action: Action,
-    page,
+    channel,
     openclaw,
     ws_update_callback: Optional[Callable] = None
 ) -> Dict[str, Any]:
     """
     Execute a tool action.
-    
-    CRITICAL: Blocked actions check runs BEFORE any browser interaction.
-    
+
+    CRITICAL: Blocked-actions check runs BEFORE any DOM command is dispatched.
+
     Args:
         action: Action to execute
-        page: Playwright Page object
-        openclaw: OpenClawClient instance
+        channel: ExtensionChannel (or any object with the same surface:
+                 get_html, fill, click, select, screenshot)
+        openclaw: OpenClawClient instance for selector resolution
         ws_update_callback: Optional WebSocket status update function
-        
-    Returns:
-        Dict with execution result
-        
-    Raises:
-        BlockedActionError: If action is in BLOCKED_ACTIONS list
-        ToolExecutionError: If execution fails
     """
-    
-    # SAFETY CHECK: Block disallowed actions before ANY browser interaction
+
+    # SAFETY CHECK: Block disallowed actions before any DOM interaction
     if action.name in BLOCKED_ACTIONS or action.name.lower() in [b.lower() for b in BLOCKED_ACTIONS]:
         logger.warning(f"BLOCKED: Agent attempted {action.name}")
         raise BlockedActionError(f"{action.name} is not in tool schema and cannot be executed")
-    
-    # Verify action is in allowed TOOLS
+
     allowed_actions = [tool["name"] for tool in TOOLS]
     if action.name not in allowed_actions:
         logger.warning(f"UNKNOWN ACTION: {action.name}")
         raise BlockedActionError(f"{action.name} is not a recognized tool")
-    
-    # Mark execution timestamp
+
     action.ts = datetime.utcnow().isoformat() + "Z"
-    
+
     try:
-        # Route to appropriate handler
         if action.name == ActionName.SET_DOCUMENT_TYPE:
-            result = await _set_document_type(action, page, openclaw)
+            result = await _set_document_type(action, channel, openclaw)
         elif action.name == ActionName.FILL_FIELD:
-            result = await _fill_field(action, page, openclaw)
+            result = await _fill_field(action, channel, openclaw)
         elif action.name == ActionName.CLEAR_TABLE:
-            result = await _clear_table(action, page, openclaw)
+            result = await _clear_table(action, channel, openclaw)
         elif action.name == ActionName.INSERT_TABLE_ROW:
-            result = await _insert_table_row(action, page, openclaw)
+            result = await _insert_table_row(action, channel, openclaw)
         elif action.name == ActionName.TAKE_SCREENSHOT:
-            result = await _take_screenshot(action, page)
+            result = await _take_screenshot(action, channel)
         elif action.name == ActionName.FLAG_INCOMPLETE:
             result = await _flag_incomplete(action, ws_update_callback)
         elif action.name == ActionName.REPORT_COMPLETE:
@@ -322,153 +313,121 @@ async def execute(
         raise ToolExecutionError(f"Failed to execute {action.name}: {e}")
 
 
-async def _set_document_type(
-    action: Action,
-    page,
-    openclaw
-) -> Dict[str, Any]:
+async def _set_document_type(action, channel, openclaw) -> Dict[str, Any]:
     """Select document type from dropdown."""
     doc_type = action.parameters["doc_type"]
-    
-    html = await page.content()
+
+    html = await channel.get_html()
     selector = await openclaw.resolve(
         description="dropdown menu for selecting document type",
-        page_html=html
+        page_html=html,
     )
-    
     action.selector_used = selector
-    await page.select_option(selector, value=doc_type)
-    
+    await channel.select(selector, doc_type)
+
     logger.info(f"Set document type: {doc_type}")
-    return {
-        "status_message": f"Set document type to {doc_type}",
-        "value": doc_type
-    }
+    return {"status_message": f"Set document type to {doc_type}", "value": doc_type}
 
 
-async def _fill_field(
-    action: Action,
-    page,
-    openclaw
-) -> Dict[str, Any]:
+async def _fill_field(action, channel, openclaw) -> Dict[str, Any]:
     """Write value to named field."""
     field_name = action.parameters["field_name"]
     value = action.parameters["value"]
-    
-    # Strip dollar signs and commas from amounts
+
     if field_name in ["net_total", "invoice_total"]:
         value = value.replace("$", "").replace(",", "").strip()
-    
-    html = await page.content()
+
+    html = await channel.get_html()
     selector = await openclaw.resolve(
         description=f"input field for {field_name}",
-        page_html=html
+        page_html=html,
     )
-    
     action.selector_used = selector
-    await page.fill(selector, value)
-    
+    await channel.fill(selector, value)
+
     logger.info(f"Filled {field_name} = {value}")
-    return {
-        "status_message": f"Filled {field_name}",
-        "field": field_name,
-        "value": value
-    }
+    return {"status_message": f"Filled {field_name}", "field": field_name, "value": value}
 
 
-async def _clear_table(
-    action: Action,
-    page,
-    openclaw
-) -> Dict[str, Any]:
+async def _clear_table(action, channel, openclaw) -> Dict[str, Any]:
     """Delete all rows from line items table."""
-    html = await page.content()
+    html = await channel.get_html()
     selector = await openclaw.resolve(
-        description="button to delete all rows or clear table",
-        page_html=html
+        description="button to delete all rows or clear the line items table",
+        page_html=html,
     )
-    
     action.selector_used = selector
-    await page.click(selector)
-    
+    await channel.click(selector)
+
     logger.info("Cleared line items table")
-    return {
-        "status_message": "Cleared all line items"
-    }
+    return {"status_message": "Cleared all line items"}
 
 
-async def _insert_table_row(
-    action: Action,
-    page,
-    openclaw
-) -> Dict[str, Any]:
+async def _insert_table_row(action, channel, openclaw) -> Dict[str, Any]:
     """Add one line item row."""
     description = action.parameters["description"]
     qty = action.parameters["qty"]
     unit_cost = action.parameters["unit_cost"].replace("$", "").replace(",", "").strip()
-    
-    # 1. Click insert row button
-    html = await page.content()
+
+    html = await channel.get_html()
     insert_btn_selector = await openclaw.resolve(
         description="button to add or insert a new line item row",
-        page_html=html
+        page_html=html,
     )
-    await page.click(insert_btn_selector)
-    
-    # Wait a tiny bit for the row to be added to the DOM
-    await asyncio.sleep(0.2)
-    
-    # 2. Fill row fields (description, qty, unit_cost)
-    html = await page.content()
+    await channel.click(insert_btn_selector)
+
+    # Tiny pause for the new row to mount
+    await asyncio.sleep(0.25)
+
+    html = await channel.get_html()
     desc_selector = await openclaw.resolve(
-        description="the empty or newly added description input field in the line items table",
-        page_html=html
+        description="the most recently added empty description input in the line items table",
+        page_html=html,
     )
     qty_selector = await openclaw.resolve(
-        description="the empty or newly added quantity input field in the line items table",
-        page_html=html
+        description="the most recently added empty quantity input in the line items table",
+        page_html=html,
     )
     cost_selector = await openclaw.resolve(
-        description="the empty or newly added unit cost input field in the line items table",
-        page_html=html
+        description="the most recently added empty unit cost input in the line items table",
+        page_html=html,
     )
-    
+
     action.selector_used = f"{insert_btn_selector} -> {desc_selector}"
-    
-    await page.fill(desc_selector, description)
-    await page.fill(qty_selector, qty)
-    await page.fill(cost_selector, unit_cost)
-    
+
+    await channel.fill(desc_selector, description)
+    await channel.fill(qty_selector, qty)
+    await channel.fill(cost_selector, unit_cost)
+
     logger.info(f"Inserted row: {description} x{qty} @ {unit_cost}")
     return {
         "status_message": f"Added line item: {description}",
-        "row": {
-            "description": description,
-            "qty": qty,
-            "unit_cost": unit_cost
-        }
+        "row": {"description": description, "qty": qty, "unit_cost": unit_cost},
     }
 
 
-async def _take_screenshot(
-    action: Action,
-    page
-) -> Dict[str, Any]:
-    """Capture page screenshot."""
+async def _take_screenshot(action, channel) -> Dict[str, Any]:
+    """Capture page screenshot via the extension."""
+    import base64
+
     reason = action.parameters["reason"]
-    
+
+    b64 = await channel.screenshot()
+
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     filename = f"screenshot_{timestamp}.png"
     path = Path.cwd() / "logs" / "screenshots" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
-    
-    await page.screenshot(path=str(path))
-    
+
+    if b64:
+        try:
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64))
+        except Exception as e:
+            logger.warning(f"Could not save screenshot bytes: {e}")
+
     logger.info(f"Screenshot taken: {reason} -> {path}")
-    return {
-        "status_message": f"Screenshot: {reason}",
-        "screenshot_path": str(path)
-    }
+    return {"status_message": f"Screenshot: {reason}", "screenshot_path": str(path)}
 
 
 async def _flag_incomplete(

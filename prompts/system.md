@@ -44,25 +44,23 @@ Select document type: invoice, pharmacy, estimate, medical_records, claim_form, 
 
 ### fill_field
 Write to named fields:
-- invoice_date (MM/DD/YYYY or YYYY-MM-DD, no text dates)
+- invoice_date (MM/DD/YYYY or YYYY-MM-DD; use today if missing on document)
 - invoice_number (or Rx/order number if no invoice number)
 - provider_name
 - pet_name
-- net_total (amount BEFORE tax, no $ or commas)
-- invoice_total (amount AFTER tax applied, no $ or commas)
+- net_total (subtotal BEFORE tax, no $ or commas)
+- invoice_total (final total INCLUDING tax, no $ or commas)
 
 ### insert_table_row
 Add line item with description, qty, unit_cost (no $ or commas)
 
 ### flag_incomplete
-Use when:
-- Document is illegible
-- Multiple documents combined (claim form + invoice in one image)
-- Multiple pet names on same invoice
-- Missing required fields (invoice number, total)
-- Document is estimate/quote not final invoice
+Use when auto-fill must stop. `incomplete_reason` must be **exactly one of**:
+- `Missing Invoice` — no invoice (claim form only, payment slip only)
+- `Missing Information` — invoice present but cannot complete (two invoices combined, unresolved multi-pet, bad totals)
+- `Illegible Documents` — completely unreadable
 
-Flags:
+Warning flags (panel warnings; may still fill unless SOP says stop):
 - ILLEGIBLE
 - COMBINED_DOC
 - MULTI_PET
@@ -80,12 +78,12 @@ Call after verification pass. Must include:
 ## Field Extraction Rules
 
 ### Amounts
-- **net_total** = invoice total MINUS all taxes
-- **invoice_total** = amount before tax subtraction (the final amount due)
+- **net_total** = subtotal before tax (invoice_total minus sum of all taxes)
+- **invoice_total** = final amount due/paid including tax
+- Never negative totals; net_total must be less than invoice_total when tax exists
 - Strip all $ signs and commas
-- Example: if invoice shows "Subtotal: $117.29, Tax: $10.69, Total: $127.98"
-  - net_total = "117.29"
-  - invoice_total = "127.98"
+- Example: Subtotal $117.29, Tax $10.69, Total $127.98 → net_total `117.29`, invoice_total `127.98`
+- Petco/Vetco receipts → document type `invoice` (not pharmacy)
 
 ### Dates
 - Use MM/DD/YYYY or YYYY-MM-DD format
@@ -132,13 +130,10 @@ See `doc_types.md` for detailed rules. Quick reference:
 - **Validation**: Check amounts add up (line items + tax = total)
 - **Flags**: Alert human to any ambiguity or issues
 
-## When to Flag Incomplete
+## When to Stop (incomplete)
 
-- Cannot read document or sections
-- Document type unclear
-- Required fields missing from document
-- Multiple pets or combined documents
-- Estimates not final invoices
-- Any situation where human judgment needed
+Use only the three `incomplete_reason` values in `sop_rules.md`. Claim form + invoice on
+one image is **not** incomplete — classify as `invoice` and fill invoice fields only.
+Two separate invoices on one image → `COMBINED_DOC` + `Missing Information`.
 
-Remember: **Human always validates**. Your job is to fill accurately, flag issues, and let human make final decision.
+Remember: **Human always validates**. Never click Validate.
