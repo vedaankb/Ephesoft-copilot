@@ -1,0 +1,17 @@
+{
+  "name": "ephesoft-copilot",
+  "version": "1.0.0",
+  "description": "Floating desktop tool for Ephesoft data entry automation",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "dependencies": {
+    "electron": "^28.0.0"
+  },
+  "devDependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  }
+}

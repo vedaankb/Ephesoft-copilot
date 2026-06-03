@@ -1,0 +1,23 @@
+{
+  "GEMINI_API_KEY": "",
+  "EPHESOFT_URL": "",
+  "MOCK": false,
+  "LOG_SCREENSHOTS": true,
+  "LOG_ACTIONS": true,
+  "OPENCLAW_FALLBACK": true,
+  "MAX_RETRIES": 2,
+  "field_selectors": {
+    "invoice_date": "",
+    "invoice_number": "",
+    "provider_name": "",
+    "pet_name": "",
+    "net_total": "",
+    "invoice_total": "",
+    "document_type_dropdown": "",
+    "table_insert_row_btn": "",
+    "table_delete_all_btn": "",
+    "table_row_description": "",
+    "table_row_qty": "",
+    "table_row_unit_cost": ""
+  }
+}

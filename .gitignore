@@ -1,0 +1,10 @@
+config.json
+.env
+browser-data/
+*.session
+logs/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+fixtures/sample_docs/
