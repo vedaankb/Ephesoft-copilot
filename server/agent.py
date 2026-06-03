@@ -31,22 +31,12 @@ async def fill_batch(
     
     Flow:
     1. Screenshot current page
-    2. Extract data via Gemini
-    3. Plan actions
-    4. Execute actions with status updates
-    5. Verification pass
-    6. Report complete or flag incomplete
-    
-    Args:
-        browser_session: Playwright browser session
-        gemini_client: Gemini API client
-        openclaw_client: OpenClaw element resolver
-        config: Configuration dict
-        ws_update_callback: WebSocket status update function
-        action_logger: Action logging handler
-        
-    Returns:
-        Dict with completion status
+    2. Fetch document raw bytes
+    3. Extract data via Gemini
+    4. Plan actions
+    5. Execute actions with status updates (using OpenClaw for resolution)
+    6. Verification pass
+    7. Report complete or flag incomplete
     """
     
     try:
@@ -54,25 +44,38 @@ async def fill_batch(
         await ws_update_callback({"type": "status", "message": "Taking screenshot..."})
         screenshot_b64 = await browser_session.screenshot()
         
-        # 2. Fetch document URL(s) from current batch page
-        doc_urls = await browser_session.get_document_urls()
+        # 2. Fetch document raw bytes
+        await ws_update_callback({"type": "status", "message": "Fetching document..."})
+        doc_bytes = await browser_session.fetch_doc_bytes()
         
         # 3. Extract data via Gemini Vision
         await ws_update_callback({"type": "status", "message": "Extracting data with Gemini..."})
         
         extraction = await gemini_client.extract(
             screenshot_b64=screenshot_b64,
-            doc_urls=doc_urls
+            doc_bytes=doc_bytes
         )
         
-        doc_type = extraction["doc_type"]
-        confidence = extraction["confidence"]
+        doc_type = extraction.get("doc_type", "invoice")
+        confidence = extraction.get("confidence", 0)
         flags = extraction.get("flags", [])
         
         await ws_update_callback({
             "type": "status",
             "message": f"Detected: {doc_type} ({confidence}%)"
         })
+        
+        # If flags are present, report them to the panel
+        if flags:
+            await ws_update_callback({
+                "type": "status",
+                "message": f"Warnings detected: {', '.join(flags)}"
+            })
+            # Send flags explicitly to the panel
+            await ws_update_callback({
+                "type": "warning",
+                "message": f"Flags triggered: {', '.join(flags)}"
+            })
         
         # If flagged incomplete during extraction, stop here
         if extraction.get("incomplete_reason"):
@@ -81,6 +84,12 @@ async def fill_batch(
                 "reason": extraction["incomplete_reason"],
                 "flags": flags
             })
+            
+            # Save final state in action logger
+            action_logger.set_doc_type(doc_type)
+            action_logger.set_completion(red_fields=[], flags=flags, human_edit=False)
+            await action_logger.save()
+            
             return {
                 "status": "incomplete",
                 "reason": extraction["incomplete_reason"],
@@ -99,23 +108,28 @@ async def fill_batch(
         for idx, action in enumerate(actions, 1):
             action.seq = idx
             
+            # Construct user-friendly status message
+            status_msg = f"Executing {action.name}..."
+            if action.name == "set_document_type":
+                status_msg = f"Setting document type to {action.parameters['doc_type']}..."
+            elif action.name == "fill_field":
+                status_msg = f"Filling field {action.parameters['field_name']}..."
+            elif action.name == "clear_table":
+                status_msg = "Clearing line items table..."
+            elif action.name == "insert_table_row":
+                status_msg = f"Adding line item: {action.parameters['description']}..."
+                
             await ws_update_callback({
                 "type": "status",
-                "message": f"[{idx}/{len(actions)}] {action.name}..."
+                "message": f"[{idx}/{len(actions)}] {status_msg}"
             })
             
             try:
-                # Resolve element if needed (OpenClaw fallback)
-                if action.element_description:
-                    element = await openclaw_client.resolve(action.element_description)
-                    action.selector_used = element.selector
-                    action.openclaw_fallback = element.used_openclaw
-                
-                # Execute action
-                result = await execute(
+                # Execute action using OpenClaw resolution inside tools.py
+                await execute(
                     action=action,
-                    browser_session=browser_session,
-                    config=config,
+                    page=browser_session.page,
+                    openclaw=openclaw_client,
                     ws_update_callback=ws_update_callback
                 )
                 
@@ -131,7 +145,6 @@ async def fill_batch(
                 action.error = str(e)
                 await action_logger.log_action(action)
                 
-                # Continue with remaining actions even if one fails
                 await ws_update_callback({
                     "type": "warning",
                     "message": f"Action failed: {action.name} - {e}"
@@ -148,35 +161,24 @@ async def fill_batch(
         ok = verification.get("ok", False)
         
         # 8. Report complete
-        if ok and len(red_fields) == 0:
-            await ws_update_callback({
-                "type": "complete",
-                "doc_type": doc_type,
-                "red_fields": [],
-                "flags": flags
-            })
-            
-            return {
-                "status": "complete",
-                "doc_type": doc_type,
-                "red_fields": [],
-                "flags": flags
-            }
-        else:
-            # Has red fields - report but still complete
-            await ws_update_callback({
-                "type": "complete",
-                "doc_type": doc_type,
-                "red_fields": red_fields,
-                "flags": flags
-            })
-            
-            return {
-                "status": "complete_with_warnings",
-                "doc_type": doc_type,
-                "red_fields": red_fields,
-                "flags": flags
-            }
+        await ws_update_callback({
+            "type": "complete",
+            "doc_type": doc_type,
+            "red_fields": red_fields,
+            "flags": flags
+        })
+        
+        # Save final state in action logger
+        action_logger.set_doc_type(doc_type)
+        action_logger.set_completion(red_fields=red_fields, flags=flags, human_edit=False)
+        await action_logger.save()
+        
+        return {
+            "status": "complete",
+            "doc_type": doc_type,
+            "red_fields": red_fields,
+            "flags": flags
+        }
     
     except Exception as e:
         logger.error(f"Fill batch error: {e}")
@@ -192,6 +194,7 @@ async def fill_batch(
 
 async def open_next_batch(
     browser_session,
+    openclaw_client,
     config: Dict[str, Any],
     ws_update_callback: Callable
 ) -> Dict[str, Any]:
@@ -200,37 +203,26 @@ async def open_next_batch(
     
     Flow:
     1. Navigate to batch list view
-    2. Parse all visible batches
+    2. Parse all visible batches using Gemini
     3. Filter: status != "in_progress" AND assigned_to == null
     4. Sort by created_at ASC (oldest first)
-    5. Click top result
+    5. Click top result using OpenClaw
     6. Report opened batch
-    
-    Args:
-        browser_session: Playwright browser session
-        config: Configuration dict
-        ws_update_callback: WebSocket status update function
-        
-    Returns:
-        Dict with opened batch info
     """
     
     try:
         # 1. Navigate to batch list
         await ws_update_callback({"type": "status", "message": "Loading batch list..."})
-        
-        batch_list_url = f"{config['EPHESOFT_URL']}/batches"
-        await browser_session.navigate(batch_list_url)
+        await browser_session.navigate_to_batch_list()
         
         # 2. Parse visible batches
         await ws_update_callback({"type": "status", "message": "Parsing batches..."})
-        
-        batches = await browser_session.parse_batch_list()
+        batches = await browser_session.parse_batch_list(openclaw_client)
         
         # 3. Filter
         available_batches = [
             b for b in batches
-            if b["status"] != "in_progress" and b["assigned_to"] is None
+            if b.get("status") != "in_progress" and b.get("assigned_to") is None
         ]
         
         if not available_batches:
@@ -244,29 +236,30 @@ async def open_next_batch(
             }
         
         # 4. Sort by created_at (oldest first)
-        available_batches.sort(key=lambda b: b["created_at"])
+        available_batches.sort(key=lambda b: b.get("created_at", ""))
         
         oldest_batch = available_batches[0]
+        batch_id = oldest_batch["id"]
         
         # 5. Open batch
         await ws_update_callback({
             "type": "status",
-            "message": f"Opening batch {oldest_batch['id']}..."
+            "message": f"Opening batch {batch_id}..."
         })
         
-        await browser_session.open_batch(oldest_batch["id"])
+        await browser_session.open_batch(batch_id, openclaw_client)
         
         # 6. Report success
         await ws_update_callback({
             "type": "batch_opened",
-            "batch_id": oldest_batch["id"],
-            "created_at": oldest_batch["created_at"]
+            "batch_id": batch_id,
+            "created_at": oldest_batch.get("created_at")
         })
         
         return {
             "status": "opened",
-            "batch_id": oldest_batch["id"],
-            "created_at": oldest_batch["created_at"]
+            "batch_id": batch_id,
+            "created_at": oldest_batch.get("created_at")
         }
     
     except Exception as e:

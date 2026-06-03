@@ -171,7 +171,8 @@ function App() {
     };
     
     const handleEditedClick = () => {
-        // TODO: Log human_edit flag to action log
+        if (!isConnected) return;
+        wsRef.current.send(JSON.stringify({ type: 'human_edit', payload: {} }));
         alert('Marked as edited - logged for quality tracking');
     };
     

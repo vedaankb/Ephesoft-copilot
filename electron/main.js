@@ -19,7 +19,11 @@ let serverProcess;
 function startServer() {
     console.log('Starting FastAPI server...');
     
-    serverProcess = spawn('python', ['-m', 'uvicorn', 'server.main:app', '--host', '127.0.0.1', '--port', '8000'], {
+    const pythonBin = process.platform === 'win32'
+        ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
+        : path.join(__dirname, '..', '.venv', 'bin', 'python');
+        
+    serverProcess = spawn(pythonBin, ['-m', 'uvicorn', 'server.main:app', '--host', '127.0.0.1', '--port', '8000'], {
         cwd: path.join(__dirname, '..'),
         stdio: 'inherit'
     });

@@ -5,12 +5,15 @@ CRITICAL SAFETY:
 - BLOCKED_ACTIONS are structurally prevented from execution
 - Only closed set of TOOLS can be called
 - No generic click/navigate/submit actions exist
+- Every browser action resolves its target through OpenClaw first (no selector map)
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import asyncio
+from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +221,7 @@ class Action:
         self.error: Optional[str] = None
         self.ts: Optional[str] = None
         self.selector_used: Optional[str] = None
-        self.openclaw_fallback: bool = False
+        self.openclaw_fallback: bool = True  # Always true in this architecture
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert action to dict for logging."""
@@ -236,9 +239,9 @@ class Action:
 
 async def execute(
     action: Action,
-    browser_session,
-    config: Dict[str, Any],
-    ws_update_callback=None
+    page,
+    openclaw,
+    ws_update_callback: Optional[Callable] = None
 ) -> Dict[str, Any]:
     """
     Execute a tool action.
@@ -247,8 +250,8 @@ async def execute(
     
     Args:
         action: Action to execute
-        browser_session: Playwright browser session
-        config: Configuration dict
+        page: Playwright Page object
+        openclaw: OpenClawClient instance
         ws_update_callback: Optional WebSocket status update function
         
     Returns:
@@ -276,15 +279,15 @@ async def execute(
     try:
         # Route to appropriate handler
         if action.name == ActionName.SET_DOCUMENT_TYPE:
-            result = await _set_document_type(action, browser_session, config)
+            result = await _set_document_type(action, page, openclaw)
         elif action.name == ActionName.FILL_FIELD:
-            result = await _fill_field(action, browser_session, config)
+            result = await _fill_field(action, page, openclaw)
         elif action.name == ActionName.CLEAR_TABLE:
-            result = await _clear_table(action, browser_session, config)
+            result = await _clear_table(action, page, openclaw)
         elif action.name == ActionName.INSERT_TABLE_ROW:
-            result = await _insert_table_row(action, browser_session, config)
+            result = await _insert_table_row(action, page, openclaw)
         elif action.name == ActionName.TAKE_SCREENSHOT:
-            result = await _take_screenshot(action, browser_session, config)
+            result = await _take_screenshot(action, page)
         elif action.name == ActionName.FLAG_INCOMPLETE:
             result = await _flag_incomplete(action, ws_update_callback)
         elif action.name == ActionName.REPORT_COMPLETE:
@@ -319,20 +322,22 @@ async def execute(
         raise ToolExecutionError(f"Failed to execute {action.name}: {e}")
 
 
-# Tool implementation stubs - to be wired to browser.py and openclaw_client.py
-
-
 async def _set_document_type(
     action: Action,
-    browser_session,
-    config: Dict[str, Any]
+    page,
+    openclaw
 ) -> Dict[str, Any]:
     """Select document type from dropdown."""
     doc_type = action.parameters["doc_type"]
     
-    # TODO: Wire to browser_session.select_dropdown()
-    # selector = config["field_selectors"]["document_type_dropdown"]
-    # await browser_session.select(selector, doc_type)
+    html = await page.content()
+    selector = await openclaw.resolve(
+        description="dropdown menu for selecting document type",
+        page_html=html
+    )
+    
+    action.selector_used = selector
+    await page.select_option(selector, value=doc_type)
     
     logger.info(f"Set document type: {doc_type}")
     return {
@@ -343,8 +348,8 @@ async def _set_document_type(
 
 async def _fill_field(
     action: Action,
-    browser_session,
-    config: Dict[str, Any]
+    page,
+    openclaw
 ) -> Dict[str, Any]:
     """Write value to named field."""
     field_name = action.parameters["field_name"]
@@ -354,11 +359,14 @@ async def _fill_field(
     if field_name in ["net_total", "invoice_total"]:
         value = value.replace("$", "").replace(",", "").strip()
     
-    # TODO: Wire to browser_session.fill_field()
-    # selector = config["field_selectors"][field_name]
-    # await browser_session.fill(selector, value)
+    html = await page.content()
+    selector = await openclaw.resolve(
+        description=f"input field for {field_name}",
+        page_html=html
+    )
     
-    action.selector_used = f"#{field_name}"  # Placeholder
+    action.selector_used = selector
+    await page.fill(selector, value)
     
     logger.info(f"Filled {field_name} = {value}")
     return {
@@ -370,14 +378,18 @@ async def _fill_field(
 
 async def _clear_table(
     action: Action,
-    browser_session,
-    config: Dict[str, Any]
+    page,
+    openclaw
 ) -> Dict[str, Any]:
     """Delete all rows from line items table."""
+    html = await page.content()
+    selector = await openclaw.resolve(
+        description="button to delete all rows or clear table",
+        page_html=html
+    )
     
-    # TODO: Wire to browser_session.click()
-    # selector = config["field_selectors"]["table_delete_all_btn"]
-    # await browser_session.click(selector)
+    action.selector_used = selector
+    await page.click(selector)
     
     logger.info("Cleared line items table")
     return {
@@ -387,17 +399,45 @@ async def _clear_table(
 
 async def _insert_table_row(
     action: Action,
-    browser_session,
-    config: Dict[str, Any]
+    page,
+    openclaw
 ) -> Dict[str, Any]:
     """Add one line item row."""
     description = action.parameters["description"]
     qty = action.parameters["qty"]
     unit_cost = action.parameters["unit_cost"].replace("$", "").replace(",", "").strip()
     
-    # TODO: Wire to browser_session
     # 1. Click insert row button
+    html = await page.content()
+    insert_btn_selector = await openclaw.resolve(
+        description="button to add or insert a new line item row",
+        page_html=html
+    )
+    await page.click(insert_btn_selector)
+    
+    # Wait a tiny bit for the row to be added to the DOM
+    await asyncio.sleep(0.2)
+    
     # 2. Fill row fields (description, qty, unit_cost)
+    html = await page.content()
+    desc_selector = await openclaw.resolve(
+        description="the empty or newly added description input field in the line items table",
+        page_html=html
+    )
+    qty_selector = await openclaw.resolve(
+        description="the empty or newly added quantity input field in the line items table",
+        page_html=html
+    )
+    cost_selector = await openclaw.resolve(
+        description="the empty or newly added unit cost input field in the line items table",
+        page_html=html
+    )
+    
+    action.selector_used = f"{insert_btn_selector} -> {desc_selector}"
+    
+    await page.fill(desc_selector, description)
+    await page.fill(qty_selector, qty)
+    await page.fill(cost_selector, unit_cost)
     
     logger.info(f"Inserted row: {description} x{qty} @ {unit_cost}")
     return {
@@ -412,19 +452,22 @@ async def _insert_table_row(
 
 async def _take_screenshot(
     action: Action,
-    browser_session,
-    config: Dict[str, Any]
+    page
 ) -> Dict[str, Any]:
     """Capture page screenshot."""
     reason = action.parameters["reason"]
     
-    # TODO: Wire to browser_session.screenshot()
-    # screenshot_path = await browser_session.screenshot()
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    filename = f"screenshot_{timestamp}.png"
+    path = Path.cwd() / "logs" / "screenshots" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     
-    logger.info(f"Screenshot taken: {reason}")
+    await page.screenshot(path=str(path))
+    
+    logger.info(f"Screenshot taken: {reason} -> {path}")
     return {
         "status_message": f"Screenshot: {reason}",
-        "screenshot_path": None  # Placeholder
+        "screenshot_path": str(path)
     }
 
 

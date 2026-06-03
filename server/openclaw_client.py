@@ -1,94 +1,109 @@
 """
 OpenClaw element resolution wrapper.
 
-Fallback for when CSS selectors fail - uses vision-based element detection.
+Uses Gemini 1.5 Pro to resolve natural language element descriptions
+into valid CSS selectors based on the current page HTML.
 """
 
 import logging
+import re
 from typing import Dict, Any, Optional
+import google.generativeai as genai
+import keyring
 
 logger = logging.getLogger(__name__)
 
 
-# OpenClaw fallback descriptions for key fields
-OPENCLAW_DESCRIPTIONS = {
-    "invoice_date": "date field labeled invoice date or service date",
-    "invoice_number": "text field for invoice number or reference number",
-    "provider_name": "text input for provider or vendor name",
-    "pet_name": "text field for pet name or patient name",
-    "net_total": "numeric field for net total or subtotal before tax",
-    "invoice_total": "numeric field for invoice total or amount due",
-    "document_type_dropdown": "dropdown menu for selecting document type",
-    "table_insert_row_btn": "button to add or insert a new line item row",
-    "table_delete_all_btn": "button to delete all rows or clear table",
-    "table_row_description": "text field for line item description in table",
-    "table_row_qty": "numeric input for quantity in line item table",
-    "table_row_unit_cost": "numeric input for unit cost or price in table",
-}
-
-
-class ElementResult:
-    """Result from element resolution."""
+def clean_html(html: str) -> str:
+    """
+    Clean HTML to focus on visible form area and reduce token size.
+    Strips head, scripts, styles, nav, and SVGs, and collapses whitespace.
+    """
+    if not html:
+        return ""
     
-    def __init__(self, selector: str, used_openclaw: bool = False):
-        self.selector = selector
-        self.used_openclaw = used_openclaw
+    # Remove head, script, style, nav, svg tags and their contents
+    html = re.sub(r'<head\b[^>]*>.*?</head>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r'<script\b[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r'<style\b[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r'<nav\b[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r'<svg\b[^>]*>.*?</svg>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Collapse multiple whitespaces and newlines
+    html = re.sub(r'\s+', ' ', html)
+    
+    return html.strip()
 
 
 class OpenClawClient:
-    """Client for OpenClaw element resolution."""
+    """Client for OpenClaw element resolution using Gemini."""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.enabled = config.get("OPENCLAW_FALLBACK", True)
+        
+        # Try to load API key from OS keychain first, then fallback to config
+        self.api_key = None
+        try:
+            self.api_key = keyring.get_password("ephesoft-copilot", "GEMINI_API_KEY")
+        except Exception as e:
+            logger.warning(f"Failed to read from keyring: {e}")
+            
+        if not self.api_key:
+            self.api_key = config.get("GEMINI_API_KEY")
+            
+        if not self.api_key:
+            logger.warning("GEMINI_API_KEY not found in keyring or config.json")
+        else:
+            genai.configure(api_key=self.api_key)
+            
+        # Use gemini-1.5-pro for complex HTML reasoning
+        self.model_name = 'gemini-1.5-pro'
+        self.model = genai.GenerativeModel(self.model_name)
     
-    async def resolve(
-        self,
-        element_description: str,
-        browser_session,
-        fallback_selector: Optional[str] = None
-    ) -> ElementResult:
+    async def resolve(self, description: str, page_html: str) -> str:
         """
-        Resolve element using OpenClaw vision-based detection.
+        Resolve a natural language description to a CSS selector using Gemini.
         
         Args:
-            element_description: Natural language description of element
-            browser_session: Current browser session for screenshot
-            fallback_selector: CSS selector to try first
+            description: Natural language description of the target element
+            page_html: Current raw HTML content of the page
             
         Returns:
-            ElementResult with selector and whether OpenClaw was used
+            A valid CSS selector string
         """
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY is not configured. Cannot resolve elements.")
+            
+        # Clean and trim HTML to focus on relevant elements and stay within token budget
+        cleaned = clean_html(page_html)
+        trimmed_html = cleaned[:15000]
         
-        # If OpenClaw fallback disabled, just use selector
-        if not self.enabled and fallback_selector:
-            logger.debug(f"OpenClaw disabled, using selector: {fallback_selector}")
-            return ElementResult(selector=fallback_selector, used_openclaw=False)
+        prompt = f"""You are an HTML element resolver.
+Return ONLY a valid CSS selector that uniquely identifies the described element.
+No explanation. No markdown. Just the selector string.
+
+Description: {description}
+
+HTML:
+{trimmed_html}"""
         
-        # Try selector first if provided
-        if fallback_selector:
-            try:
-                # TODO: Check if selector exists on page
-                # If exists, return it without calling OpenClaw
-                logger.debug(f"Using selector: {fallback_selector}")
-                return ElementResult(selector=fallback_selector, used_openclaw=False)
-            except Exception as e:
-                logger.warning(f"Selector failed: {fallback_selector} - {e}")
+        logger.info(f"Resolving element with OpenClaw: '{description}'")
         
-        # Fallback to OpenClaw
-        logger.info(f"Using OpenClaw for: {element_description}")
-        
-        # TODO: Implement actual OpenClaw API call
-        # 1. Take screenshot of current page
-        # 2. Call OpenClaw API with screenshot + element_description
-        # 3. Get back coordinates or selector
-        
-        # Placeholder: return a generic selector
-        openclaw_selector = f"[data-openclaw-target='{element_description[:20]}']"
-        
-        logger.info(f"OpenClaw resolved: {openclaw_selector}")
-        return ElementResult(selector=openclaw_selector, used_openclaw=True)
-    
-    def get_description_for_field(self, field_name: str) -> Optional[str]:
-        """Get OpenClaw description for a known field name."""
-        return OPENCLAW_DESCRIPTIONS.get(field_name)
+        try:
+            # Call Gemini API asynchronously
+            response = await self.model.generate_content_async(prompt)
+            selector = response.text.strip()
+            
+            # Clean up any markdown code block formatting if the model returned it
+            if selector.startswith("```"):
+                # Strip ```css or ```
+                selector = re.sub(r'^```[a-zA-Z]*\s*', '', selector)
+                selector = re.sub(r'\s*```$', '', selector)
+                selector = selector.strip()
+                
+            logger.info(f"OpenClaw resolved '{description}' -> '{selector}'")
+            return selector
+            
+        except Exception as e:
+            logger.error(f"OpenClaw resolution failed for '{description}': {e}")
+            raise RuntimeError(f"OpenClaw failed to resolve element: {e}")
