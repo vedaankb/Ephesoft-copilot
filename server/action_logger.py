@@ -17,8 +17,7 @@ import json
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
-from pathlib import Path
-import uuid
+from server.paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ class ActionLogger:
         
         # Create log file path
         timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-        self.log_path = Path.cwd() / "logs" / "actions" / f"{timestamp}.json"
+        self.log_path = get_app_root() / "logs" / "actions" / f"{timestamp}.json"
         
         logger.info(f"Action logger started: {self.session_id}")
     
@@ -129,7 +128,7 @@ class ActionLogger:
         Returns:
             List of session log file paths
         """
-        logs_dir = Path.cwd() / "logs" / "actions"
+        logs_dir = get_app_root() / "logs" / "actions"
         
         if not logs_dir.exists():
             return []
@@ -158,7 +157,7 @@ def save_screenshot(batch_id: str, stage: str, screenshot_bytes: bytes) -> str:
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     filename = f"{stage}_{batch_id}_{timestamp}.png"
     
-    screenshots_dir = Path.cwd() / "logs" / "screenshots"
+    screenshots_dir = get_app_root() / "logs" / "screenshots"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     
     screenshot_path = screenshots_dir / filename

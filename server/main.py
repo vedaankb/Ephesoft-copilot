@@ -33,6 +33,7 @@ from server.credentials import (
     clear_gemini_api_key,
     test_gemini_api_key,
 )
+from server.paths import get_app_root, resource_path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ state = {
 
 
 def _load_config() -> dict:
-    cfg_path = Path.cwd() / "config.json"
+    cfg_path = get_app_root() / "config.json"
     if cfg_path.exists():
         try:
             with open(cfg_path) as f:
@@ -154,12 +155,12 @@ async def test_key(payload: SettingsIn):
 
 @app.get("/mock/field_view")
 async def mock_field_view():
-    return FileResponse(Path.cwd() / "fixtures" / "field_view.html")
+    return FileResponse(resource_path("fixtures", "field_view.html"))
 
 
 @app.get("/mock/batch_list")
 async def mock_batch_list():
-    return FileResponse(Path.cwd() / "fixtures" / "batch_list.html")
+    return FileResponse(resource_path("fixtures", "batch_list.html"))
 
 
 # ---------- panel WebSocket ----------

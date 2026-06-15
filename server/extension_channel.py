@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_CMDS = {
     "get_html",
     "screenshot",
+    "capture_scroll_bundle",
     "fill",
     "click",
     "select",
@@ -132,6 +133,16 @@ class ExtensionChannel:
     async def screenshot(self) -> str:
         """Returns base64 PNG of the active tab."""
         return await self._send_cmd("screenshot") or ""
+
+    async def capture_scroll_bundle(self, max_frames: int = 4) -> Dict[str, Any]:
+        """Capture multiple viewport screenshots/html chunks while auto-scrolling."""
+        result = await self._send_cmd("capture_scroll_bundle", max_frames=max_frames)
+        if not isinstance(result, dict):
+            return {"screenshots": [], "html_chunks": [], "meta": {}}
+        result.setdefault("screenshots", [])
+        result.setdefault("html_chunks", [])
+        result.setdefault("meta", {})
+        return result
 
     async def active_tab_url(self) -> str:
         return await self._send_cmd("active_tab_url") or ""

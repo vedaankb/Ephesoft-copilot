@@ -13,7 +13,7 @@ import asyncio
 from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
+from server.paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
@@ -416,7 +416,7 @@ async def _take_screenshot(action, channel) -> Dict[str, Any]:
 
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     filename = f"screenshot_{timestamp}.png"
-    path = Path.cwd() / "logs" / "screenshots" / filename
+    path = get_app_root() / "logs" / "screenshots" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if b64:

@@ -41,9 +41,13 @@ async def fill_batch(
     """
     
     try:
-        # 1. Take initial screenshot via the extension
-        await ws_update_callback({"type": "status", "message": "Taking screenshot..."})
-        screenshot_b64 = await channel.screenshot()
+        # 1. Auto-scroll capture: collect multi-frame screenshots + HTML chunks.
+        # This improves extraction on long pages where key fields are below the fold.
+        await ws_update_callback({"type": "status", "message": "Capturing page while scrolling..."})
+        bundle = await channel.capture_scroll_bundle(max_frames=4)
+        screenshots = bundle.get("screenshots") or []
+        html_chunks = bundle.get("html_chunks") or []
+        screenshot_b64 = screenshots[0] if screenshots else await channel.screenshot()
 
         # 2. Document bytes — for now we extract from the screenshot only.
         # When we know how Ephesoft serves the doc PDF, we'll fetch it via the
@@ -56,7 +60,9 @@ async def fill_batch(
         
         extraction = await gemini_client.extract(
             screenshot_b64=screenshot_b64,
-            doc_bytes=doc_bytes
+            doc_bytes=doc_bytes,
+            screenshot_frames=screenshots[1:],
+            html_chunks=html_chunks,
         )
         
         doc_type = extraction.get("doc_type", "invoice")

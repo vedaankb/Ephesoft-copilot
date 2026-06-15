@@ -34,9 +34,46 @@ Why both pieces:
 - The agent **never clicks Validate**. The human reviews what got filled and
   decides.
 
-## Install (dev)
+## Download package (for teammates)
+
+### Option A — Simple zip (dev install)
+
+Build a zip you can share (no `node_modules` / `.venv` — recipient runs install once):
 
 ```bash
+chmod +x scripts/build_package.sh install.sh launch.sh
+npm run build:package
+```
+
+Output: `dist/ephesoft-copilot-<version>-<os>-<date>.zip`
+
+Recipient flow: unzip → `./install.sh` → load `extension/` in Chrome → `./launch.sh`  
+Full steps in **INSTALL.md** (included in the zip).
+
+### Option B — One-click desktop installer (no Python install needed)
+
+| Platform | Output | Build command |
+|----------|--------|---------------|
+| **Mac** | `Ephesoft-Copilot-1.0.0-mac.dmg` | `npm run build:mac` |
+| **Windows** | `Ephesoft-Copilot-1.0.0-win-setup.exe` | `npm run build:win` |
+
+Build on the **same OS** you are targeting (Windows `.exe` must be built on Windows).
+
+```bash
+./install.sh                    # dev deps once
+npm install
+npm run build:mac               # or: npm run build:win
+```
+
+Installers land in `dist/desktop/`. The app bundles the Python backend — recipients still load the Chrome extension once (prompt on first launch).
+
+> **Note:** `.dmg` is macOS only. Windows gets a one-click **`.exe`** installer (NSIS).
+
+## Install (dev / from source)
+
+```bash
+./install.sh
+# or manually:
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 npm install
@@ -52,7 +89,8 @@ Load the extension once:
 ## Run
 
 ```bash
-.venv/bin/python run.py
+./launch.sh
+# or: .venv/bin/python run.py
 ```
 
 That spawns FastAPI on `127.0.0.1:8000` and opens the Electron panel.

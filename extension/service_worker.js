@@ -13,6 +13,7 @@ const BACKEND_WS = 'ws://127.0.0.1:8000/ws/extension';
 const ALLOWED_CMDS = new Set([
     'get_html',
     'screenshot',
+    'capture_scroll_bundle',
     'fill',
     'click',
     'select',
@@ -110,6 +111,9 @@ async function handleCommand(msg) {
             case 'screenshot':
                 result = await captureActiveTab();
                 break;
+            case 'capture_scroll_bundle':
+                result = await captureScrollBundle(msg.max_frames || 4);
+                break;
             case 'get_html':
                 result = await runInActiveTab(() => document.documentElement.outerHTML);
                 break;
@@ -144,6 +148,51 @@ async function captureActiveTab() {
     // strip "data:image/png;base64," prefix → raw base64
     const idx = dataUrl.indexOf('base64,');
     return idx >= 0 ? dataUrl.slice(idx + 'base64,'.length) : dataUrl;
+}
+
+async function captureScrollBundle(maxFrames = 4) {
+    const tab = await getActiveTab();
+    const metrics = await runInActiveTab(getScrollMetrics);
+    const totalHeight = Math.max(metrics.totalHeight || 0, metrics.viewportHeight || 0);
+    const viewportHeight = Math.max(metrics.viewportHeight || 1, 1);
+    const originalY = metrics.scrollY || 0;
+
+    const frames = Math.max(1, Math.min(Number(maxFrames) || 4, 8));
+    const steps = Math.min(frames, Math.max(1, Math.ceil(totalHeight / viewportHeight)));
+    const positions = [];
+    const maxY = Math.max(0, totalHeight - viewportHeight);
+
+    if (steps === 1) {
+        positions.push(originalY);
+    } else {
+        for (let i = 0; i < steps; i += 1) {
+            const y = Math.round((i / (steps - 1)) * maxY);
+            positions.push(y);
+        }
+    }
+
+    const screenshots = [];
+    const html_chunks = [];
+
+    for (const y of positions) {
+        await runInActiveTab(setScrollY, [y]);
+        await sleep(180);
+
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+        const idx = dataUrl.indexOf('base64,');
+        screenshots.push(idx >= 0 ? dataUrl.slice(idx + 'base64,'.length) : dataUrl);
+
+        const chunk = await runInActiveTab(getVisibleHtmlChunk);
+        html_chunks.push(chunk || "");
+    }
+
+    await runInActiveTab(setScrollY, [originalY]);
+
+    return {
+        screenshots,
+        html_chunks,
+        meta: { steps, totalHeight, viewportHeight, originalY },
+    };
 }
 
 async function runInActiveTab(func, args = []) {
@@ -216,6 +265,44 @@ function domSelect(selector, value) {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
+}
+
+function getScrollMetrics() {
+    const doc = document.documentElement;
+    return {
+        totalHeight: Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0),
+        viewportHeight: window.innerHeight || doc.clientHeight || 0,
+        scrollY: window.scrollY || doc.scrollTop || 0,
+    };
+}
+
+function setScrollY(y) {
+    window.scrollTo({ top: Number(y) || 0, behavior: 'auto' });
+    return true;
+}
+
+function getVisibleHtmlChunk() {
+    const viewportTop = window.scrollY || 0;
+    const viewportBottom = viewportTop + window.innerHeight;
+    const nodes = Array.from(document.querySelectorAll('body *'));
+    const out = [];
+
+    for (const el of nodes) {
+        if (!el || !el.getBoundingClientRect) continue;
+        const rect = el.getBoundingClientRect();
+        const top = rect.top + viewportTop;
+        const bottom = rect.bottom + viewportTop;
+        if (bottom < viewportTop || top > viewportBottom) continue;
+        if (rect.width === 0 && rect.height === 0) continue;
+        const html = el.outerHTML || "";
+        if (html.trim()) out.push(html);
+        if (out.join('\n').length > 12000) break;
+    }
+    return out.join('\n').slice(0, 12000);
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ----- popup ↔ worker messaging -----

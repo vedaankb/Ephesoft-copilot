@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional
 import google.generativeai as genai
 
 from server.tools import Action, ActionName
+from server.paths import resource_path
 from server.credentials import load_gemini_api_key, validate_gemini_api_key, configure_gemini
 from server.sop import apply_sop_post_processing, should_stop_fill
 
@@ -41,12 +42,13 @@ class GeminiClient:
         self.model = genai.GenerativeModel(self.model_name) if self.api_key else None
     
     def _load_prompt(self, path: str) -> str:
-        """Load prompt file."""
+        """Load prompt file from bundled resources."""
+        full = resource_path(path)
         try:
-            with open(path, "r") as f:
+            with open(full, "r") as f:
                 return f.read()
         except FileNotFoundError:
-            logger.warning(f"Prompt file not found: {path}")
+            logger.warning(f"Prompt file not found: {full}")
             return ""
             
     def build_system_prompt(self) -> str:
@@ -60,7 +62,9 @@ class GeminiClient:
     async def extract(
         self,
         screenshot_b64: str,
-        doc_bytes: bytes
+        doc_bytes: bytes,
+        screenshot_frames: Optional[List[str]] = None,
+        html_chunks: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Extract structured data from document.
@@ -68,6 +72,8 @@ class GeminiClient:
         Args:
             screenshot_b64: Base64-encoded screenshot of Ephesoft page
             doc_bytes: Raw bytes of the document being processed
+            screenshot_frames: Optional additional viewport screenshots
+            html_chunks: Optional per-viewport HTML chunks
             
         Returns:
             Extraction dict with doc_type, fields, line_items, tax, flags
@@ -83,15 +89,34 @@ class GeminiClient:
         system_prompt = self.build_system_prompt()
         parts.append(system_prompt)
         
-        # 2. Add the screenshot of the Ephesoft portal
-        try:
-            parts.append({
-                "mime_type": "image/png",
-                "data": base64.b64decode(screenshot_b64)
-            })
-            parts.append("This is the screenshot of the current Ephesoft portal page.")
-        except Exception as e:
-            logger.error(f"Failed to decode screenshot: {e}")
+        # 2. Add screenshot(s) of the Ephesoft portal.
+        # If multi-frame bundle exists, include all frames and ask model to merge.
+        all_frames = [screenshot_b64] + list(screenshot_frames or [])
+        added_frames = 0
+        for idx, frame_b64 in enumerate(all_frames, 1):
+            if not frame_b64:
+                continue
+            try:
+                parts.append({
+                    "mime_type": "image/png",
+                    "data": base64.b64decode(frame_b64)
+                })
+                parts.append(f"Ephesoft viewport screenshot #{idx}.")
+                added_frames += 1
+            except Exception as e:
+                logger.error(f"Failed to decode screenshot frame #{idx}: {e}")
+        if added_frames == 0:
+            logger.warning("No valid screenshot frames supplied to extraction")
+
+        # 2b. Include visible HTML chunks captured while scrolling.
+        # These chunks help extraction when fields are below the fold.
+        if html_chunks:
+            for i, chunk in enumerate(html_chunks[:8], 1):
+                if not chunk:
+                    continue
+                parts.append(
+                    f"Visible HTML chunk #{i} (truncated):\n{str(chunk)[:10000]}"
+                )
             
         # 3. Add the document being processed (PDF or image)
         if doc_bytes:
@@ -138,6 +163,9 @@ Critical SOP reminders:
 - Missing invoice_date on document → use today's date.
 - Rx/order as invoice_number → flag NO_INVOICE_NUMBER.
 - Warning flags only in "flags"; use incomplete_reason when auto-fill must stop.
+- You may receive multiple viewport screenshots and HTML chunks from one scroll pass.
+  Merge evidence across all frames/chunks before deciding values.
+  Prefer explicit, consistent values seen in multiple places.
 """)
 
         try:
