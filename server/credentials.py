@@ -122,7 +122,7 @@ async def test_gemini_api_key(api_key: str) -> dict:
         return {"ok": False, "message": str(e)}
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-pro")
         response = await model.generate_content_async("Reply with: ok")
         text = (response.text or "").strip()
         return {"ok": True, "message": f"Key works (model replied: {text[:40]})"}

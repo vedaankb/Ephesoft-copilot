@@ -7,7 +7,7 @@ Floating desktop tool (Electron + Python) that rides alongside Ephesoft. Human s
 - **Backend**: Python 3.11+, FastAPI, WebSocket
 - **Browser automation**: Playwright (Python), persistent chromium context
 - **Element resolution**: OpenClaw (fallback when selectors fail)
-- **Vision + reasoning**: Gemini 1.5 Pro Vision API
+- **Vision + reasoning**: Gemini 2.5 Pro API
 - **Frontend**: Electron + React (renderer), IPC bridge via preload.js
 - **Logging**: JSON action logs + PNG screenshots per session (local only, gitignored)
 - **Config**: OS keychain (Windows Credential Manager / macOS Keychain) via `keyring` lib

@@ -42,7 +42,7 @@ function ensureUserData() {
         } else {
             fs.writeFileSync(
                 configPath,
-                JSON.stringify({ GEMINI_MODEL: 'gemini-1.5-flash' }, null, 2)
+                JSON.stringify({ GEMINI_MODEL: 'gemini-2.5-pro' }, null, 2)
             );
         }
     }

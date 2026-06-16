@@ -119,7 +119,7 @@ async def get_settings():
     return {
         "has_api_key": bool(key),
         "key_preview": (key[:6] + "…" + key[-4:]) if key and len(key) > 12 else None,
-        "model": cfg.get("GEMINI_MODEL", "gemini-1.5-flash"),
+        "model": cfg.get("GEMINI_MODEL", "gemini-2.5-pro"),
     }
 
 
