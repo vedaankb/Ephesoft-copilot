@@ -38,7 +38,7 @@ class GeminiClient:
         else:
             logger.warning("GEMINI_API_KEY not found (env, keychain, or config.json)")
             
-        self.model_name = config.get("GEMINI_MODEL", "gemini-2.5-pro")
+        self.model_name = config.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
         self.model = genai.GenerativeModel(self.model_name) if self.api_key else None
     
     def _load_prompt(self, path: str) -> str:
@@ -81,7 +81,7 @@ class GeminiClient:
         if not self.api_key or not self.model:
             validate_gemini_api_key("")  # raises with setup instructions
             
-        logger.info("Extracting data with Gemini 2.5 Pro...")
+        logger.info("Extracting data with Gemini 3.1 Pro...")
         
         parts = []
         
@@ -276,7 +276,7 @@ Critical SOP reminders:
         if not self.api_key or not self.model:
             validate_gemini_api_key("")
             
-        logger.info("Verifying filled fields with Gemini 2.5 Pro...")
+        logger.info("Verifying filled fields with Gemini 3.1 Pro...")
         
         parts = []
         parts.append(self.build_system_prompt())

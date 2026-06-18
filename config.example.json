@@ -1,6 +1,6 @@
 {
   "GEMINI_API_KEY": "",
-  "GEMINI_MODEL": "gemini-2.5-pro",
+  "GEMINI_MODEL": "gemini-3.1-pro-preview",
   "EPHESOFT_URL": "",
   "MOCK": false,
   "LOG_SCREENSHOTS": true,

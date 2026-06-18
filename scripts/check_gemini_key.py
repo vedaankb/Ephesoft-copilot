@@ -40,7 +40,7 @@ def main():
     try:
         configure_gemini(key)
         import google.generativeai as genai
-        model = genai.GenerativeModel("gemini-2.5-pro")
+        model = genai.GenerativeModel("gemini-3.1-pro-preview")
         response = model.generate_content("Reply with exactly: ok")
         print(f"✓ API call succeeded: {response.text.strip()[:50]}")
     except Exception as e:

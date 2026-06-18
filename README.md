@@ -2,7 +2,7 @@
 
 Ephesoft Copilot is a secure, hybrid desktop utility designed to automate tedious data entry tasks for Business Process Outsourcing (BPO) agents working within the Ephesoft document processing portal. 
 
-By combining a floating Electron panel, a lightweight Google Chrome extension, and an intelligent Python backend powered by Gemini 2.5 Pro, Ephesoft Copilot reads documents with advanced vision, populates claim fields in seconds, and ensures the human agent remains firmly in control.
+By combining a floating Electron panel, a lightweight Google Chrome extension, and an intelligent Python backend powered by Gemini 3.1 Pro, Ephesoft Copilot reads documents with advanced vision, populates claim fields in seconds, and ensures the human agent remains firmly in control.
 
 ---
 
@@ -31,7 +31,7 @@ Ephesoft Copilot is built on a **hybrid, safety-first architecture** that integr
 * **Chrome Manifest V3 Extension**: Runs directly inside the agent's standard Chrome browser. It acts as the "hands" of the Copilot, executing low-level DOM actions on the active tab while preserving the agent's active login session and credentials.
 * **FastAPI Backend (Python)**: The orchestrator. It manages secure WebSocket channels, coordinates with the Gemini API, and processes page structures.
 * **OpenClaw Element Resolution**: A dynamic element-finding system. Instead of relying on fragile, hard-coded CSS selector maps that break when Ephesoft updates its UI, OpenClaw sends the page's cleaned HTML and a natural language description (e.g., *"input field for net_total"*) to Gemini to resolve the correct, real-time CSS selector on the fly.
-* **Gemini 2.5 Pro**: Extracts structured data from invoice documents, plans a sequence of safe filling actions, and performs a post-fill verification pass to flag any errors or red fields.
+* **Gemini 3.1 Pro**: Extracts structured data from invoice documents, plans a sequence of safe filling actions, and performs a post-fill verification pass to flag any errors or red fields.
 
 ---
 

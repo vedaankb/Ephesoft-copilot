@@ -1,7 +1,7 @@
 """
 OpenClaw element resolution wrapper.
 
-Uses Gemini 2.5 Pro to resolve natural language element descriptions
+Uses Gemini 3.1 Pro to resolve natural language element descriptions
 into valid CSS selectors based on the current page HTML.
 """
 
@@ -52,7 +52,7 @@ class OpenClawClient:
         else:
             logger.warning("GEMINI_API_KEY not found (env, keychain, or config.json)")
             
-        self.model_name = config.get("GEMINI_MODEL", "gemini-2.5-pro")
+        self.model_name = config.get("GEMINI_MODEL", "gemini-3.1-pro-preview")
         self.model = genai.GenerativeModel(self.model_name) if self.api_key else None
     
     async def resolve(self, description: str, page_html: str) -> str:

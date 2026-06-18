@@ -5,6 +5,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+echo "Compiling frontend app.jsx..."
+node scripts/compile_frontend.js
+
 VERSION="$(node -p "require('./package.json').version" 2>/dev/null || echo "1.0.0")"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 STAMP="$(date -u +%Y%m%d)"

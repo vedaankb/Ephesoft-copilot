@@ -15,6 +15,7 @@ Logs are append-only and never modified.
 
 import json
 import logging
+import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime
 from server.paths import get_app_root

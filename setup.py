@@ -17,7 +17,7 @@ from pathlib import Path
 
 
 DEFAULT_CONFIG = {
-    "GEMINI_MODEL": "gemini-2.5-pro",
+    "GEMINI_MODEL": "gemini-3.1-pro-preview",
     "MAX_RETRIES": 2,
     "LOG_SCREENSHOTS": True,
     "LOG_ACTIONS": True,

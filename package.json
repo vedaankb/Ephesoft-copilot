@@ -17,9 +17,12 @@
     "electron": "^28.0.0"
   },
   "devDependencies": {
+    "@babel/core": "^8.0.1",
+    "@babel/preset-react": "^8.0.1",
+    "@babel/standalone": "^8.0.0",
     "electron-builder": "^24.13.3",
-    "react": "^18.0.0",
-    "react-dom": "^18.0.0"
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "build": {
     "appId": "com.ephesoft.copilot",
@@ -36,12 +39,16 @@
       {
         "from": "dist-server/ephesoft-server",
         "to": "server",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "extension",
         "to": "extension",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "config.example.json",
@@ -53,7 +60,9 @@
       }
     ],
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.productivity",
       "artifactName": "Ephesoft-Copilot-${version}-mac.${ext}"
     },
@@ -62,7 +71,9 @@
       "artifactName": "Ephesoft-Copilot-${version}-mac.dmg"
     },
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "artifactName": "Ephesoft-Copilot-${version}-win.${ext}"
     },
     "nsis": {
