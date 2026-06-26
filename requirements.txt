@@ -1,6 +1,0 @@
-fastapi
-uvicorn[standard]
-google-generativeai
-keyring
-python-dotenv
-pydantic

@@ -1,70 +1,148 @@
-# First-time setup for Ephesoft Copilot (Windows)
+# Ephesoft Copilot - 1-Click PowerShell Bootstrap Installer
+#
+# This script downloads, extracts, and installs the Ephesoft Copilot Chrome/Edge
+# extension into the user's local app data directory (no admin rights required),
+# then creates desktop shortcuts to launch Chrome and Edge with the extension preloaded.
+#
+# Usage:
+#   irm -useb https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1 | iex
+
 $ErrorActionPreference = "Stop"
-Set-Location $PSScriptRoot
 
-Write-Host "=============================================="
-Write-Host " Ephesoft Copilot - install"
-Write-Host "=============================================="
-Write-Host ""
+Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "          EPHESOFT COPILOT INSTALLER              " -ForegroundColor Cyan
+Write-Host "==================================================" -ForegroundColor Cyan
+Write-Host "Installing Ephesoft Copilot (V2 Pure Extension)..." -ForegroundColor Yellow
 
-# --- Sanity: warn about folders that block venv creation / writes ---
-$here = (Get-Location).Path
-if ($here -like "*\Program Files*" -or $here -like "*\Program Files (x86)*") {
-    Write-Host "ERROR: This folder is under 'Program Files', which is not writable."
-    Write-Host "Move the project to e.g. C:\Users\$env:USERNAME\Ephesoft-copilot and re-run."
-    exit 1
+# --- 1. Define Paths ---
+$InstallDir = "$env:LOCALAPPDATA\EphesoftCopilot"
+$TempZip = "$env:TEMP\ephesoft-copilot-temp.zip"
+$TempExtract = "$env:TEMP\ephesoft-copilot-temp-extract"
+$RepoZipUrl = "https://github.com/vedaankb/Ephesoft-copilot/archive/refs/heads/main.zip"
+
+# --- 2. Clean Up Old Installs/Temps ---
+if (Test-Path $InstallDir) {
+    Write-Host "Removing existing installation at $InstallDir..." -ForegroundColor Gray
+    Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-if ($here -like "*OneDrive*") {
-    Write-Host "WARNING: This folder is inside OneDrive. File-sync locks can break the"
-    Write-Host "         virtual environment. If install fails, move it outside OneDrive."
-    Write-Host ""
-}
+if (Test-Path $TempZip) { Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue }
+if (Test-Path $TempExtract) { Remove-Item -Path $TempExtract -Recurse -Force -ErrorAction SilentlyContinue }
 
-# --- Check tools (PATH-based; resolves python.exe / npm.cmd) ---
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    Write-Host "ERROR: python not found. Install Python 3.11+ from https://www.python.org/downloads/"
-    Write-Host "       During install, tick 'Add python.exe to PATH'."
-    exit 1
-}
-
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host "ERROR: Node.js not found. Install from https://nodejs.org/ (LTS)."
-    exit 1
-}
-
-if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-    Write-Host "ERROR: npm not found. Reinstall Node.js from https://nodejs.org/ (LTS)."
+# --- 3. Download the Repository Zip ---
+Write-Host "Downloading latest version from GitHub..." -ForegroundColor Yellow
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $RepoZipUrl -OutFile $TempZip -UseBasicParsing
+} catch {
+    Write-Host "ERROR: Failed to download the extension zip. Check your internet connection or proxy settings." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
 }
 
-Write-Host "-> Creating virtual environment..."
-python -m venv .venv
-if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
-    Write-Host "ERROR: virtual environment was not created. Check write permissions for this folder."
+# --- 4. Extract the Zip ---
+Write-Host "Extracting files..." -ForegroundColor Yellow
+try {
+    New-Item -ItemType Directory -Force -Path $TempExtract | Out-Null
+    Expand-Archive -Path $TempZip -DestinationPath $TempExtract -Force
+} catch {
+    Write-Host "ERROR: Failed to extract zip file." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
 }
 
-# Use 'python -m pip' through the venv interpreter (avoids call-operator path issues).
-Write-Host "-> Upgrading pip..."
-.\.venv\Scripts\python.exe -m pip install --upgrade pip -q
+# --- 5. Copy Extension to Install Directory ---
+Write-Host "Installing extension files..." -ForegroundColor Yellow
+try {
+    $ExtSource = Join-Path $TempExtract "Ephesoft-copilot-main\extension"
+    if (-not (Test-Path $ExtSource)) {
+        throw "Could not find extension folder in the downloaded repository zip."
+    }
+    Copy-Item -Path $ExtSource -Destination $InstallDir -Recurse -Force
+} catch {
+    Write-Host "ERROR: Failed to copy extension files to $InstallDir." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
+} finally {
+    # Clean up temp files
+    Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $TempExtract -Recurse -Force -ErrorAction SilentlyContinue
+}
 
-Write-Host "-> Installing Python packages..."
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -q
+# --- 6. Locate Browsers ---
+$ChromePaths = @(
+    "C:\Program Files\Google\Chrome\Application\chrome.exe",
+    "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+)
+$EdgePaths = @(
+    "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    "C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+)
 
-Write-Host "-> Installing Node packages..."
-npm install
+$ChromePath = $null
+foreach ($p in $ChromePaths) {
+    if (Test-Path $p) { $ChromePath = $p; break }
+}
 
-Write-Host "-> Creating config.json..."
-.\.venv\Scripts\python.exe setup.py
+$EdgePath = $null
+foreach ($p in $EdgePaths) {
+    if (Test-Path $p) { $EdgePath = $p; break }
+}
 
-Write-Host ""
-Write-Host "=============================================="
-Write-Host " Install complete"
-Write-Host "=============================================="
-Write-Host ""
-Write-Host "Next steps:"
-Write-Host "  1. Chrome -> chrome://extensions -> Developer mode -> Load unpacked -> extension\"
-Write-Host "  2. Run:  .\launch.ps1"
-Write-Host "  3. Panel -> gear icon -> add Gemini API key"
-Write-Host ""
-Write-Host "See INSTALL.md for full instructions."
+# --- 7. Generate Desktop Shortcuts via VBScript ---
+$DesktopPath = [System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), "")
+
+function Create-Shortcut {
+    param (
+        [string]$ShortcutName,
+        [string]$BrowserPath,
+        [string]$Arguments
+    )
+    $ShortcutPath = Join-Path $DesktopPath "$ShortcutName.lnk"
+    $WshShell = New-Object -ComObject WScript.Shell
+    $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+    $Shortcut.TargetPath = $BrowserPath
+    $Shortcut.Arguments = $Arguments
+    $Shortcut.WorkingDirectory = $env:USERPROFILE
+    $Shortcut.Description = "Launch browser with Ephesoft Copilot extension preloaded"
+    $Shortcut.IconLocation = "$BrowserPath,0"
+    $Shortcut.Save()
+}
+
+$CreatedShortcuts = 0
+
+if ($ChromePath) {
+    Write-Host "Creating Google Chrome Desktop Shortcut..." -ForegroundColor Yellow
+    Create-Shortcut -ShortcutName "Ephesoft Copilot (Chrome)" -BrowserPath $ChromePath -Arguments "--load-extension=""$InstallDir"" --no-first-run"
+    $CreatedShortcuts++
+} else {
+    Write-Host "Google Chrome not found. Skipping Chrome shortcut." -ForegroundColor Gray
+}
+
+if ($EdgePath) {
+    Write-Host "Creating Microsoft Edge Desktop Shortcut..." -ForegroundColor Yellow
+    Create-Shortcut -ShortcutName "Ephesoft Copilot (Edge)" -BrowserPath $EdgePath -Arguments "--load-extension=""$InstallDir"" --no-first-run"
+    $CreatedShortcuts++
+} else {
+    Write-Host "Microsoft Edge not found. Skipping Edge shortcut." -ForegroundColor Gray
+}
+
+# --- 8. Done ---
+Write-Host "`n==================================================" -ForegroundColor Green
+Write-Host "    SUCCESS: Ephesoft Copilot Installed!          " -ForegroundColor Green
+Write-Host "==================================================" -ForegroundColor Green
+Write-Host "The extension has been installed to:" -ForegroundColor Gray
+Write-Host "  $InstallDir" -ForegroundColor White
+
+if ($CreatedShortcuts -gt 0) {
+    Write-Host "`nDesktop shortcuts created:" -ForegroundColor Gray
+    if ($ChromePath) { Write-Host "  - Ephesoft Copilot (Chrome)" -ForegroundColor Green }
+    if ($EdgePath)   { Write-Host "  - Ephesoft Copilot (Edge)" -ForegroundColor Green }
+    Write-Host "`nDouble-click a shortcut to launch the browser with the Copilot preloaded." -ForegroundColor White
+} else {
+    Write-Host "`nWARNING: No supported browser (Chrome or Edge) was found." -ForegroundColor Yellow
+    Write-Host "Please load the extension folder manually in your browser:" -ForegroundColor White
+    Write-Host "  $InstallDir" -ForegroundColor White
+}
+Write-Host "==================================================" -ForegroundColor Green

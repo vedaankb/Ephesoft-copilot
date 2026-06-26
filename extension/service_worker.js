@@ -1,326 +1,391 @@
 /**
- * Ephesoft Copilot — extension service worker.
+ * Ephesoft Copilot - service worker (agent orchestrator).
  *
- * Connects to the local FastAPI backend over WebSocket and routes a CLOSED
- * set of low-level DOM commands to the active tab. Anything outside this
- * allowlist is rejected here, before it ever reaches the page. This is
- * defense-in-depth on top of the same allowlist enforced in Python.
+ * Pure-extension V2: no backend, no Electron, no Playwright. This worker runs a
+ * dynamic, step-by-step agent loop. Each step it captures a screenshot + reads
+ * the page via the content script, asks Gemini for ONE next action, executes it,
+ * and repeats until the model calls complete/incomplete. The training SOP and
+ * doc-type rules are bundled in /prompts and injected as the system instruction
+ * (RAG) on every call.
  */
 
-const BACKEND_WS = 'ws://127.0.0.1:8000/ws/extension';
+import { callGemini, parseJsonResponse, testApiKey } from './lib/gemini.js';
 
-// ----- closed allowlist (must match server/extension_channel.py) -----
-const ALLOWED_CMDS = new Set([
-    'get_html',
-    'screenshot',
-    'capture_scroll_bundle',
-    'fill',
-    'click',
-    'select',
-    'active_tab_url',
-]);
+// ---------- side panel wiring ----------
 
-// ----- WebSocket lifecycle with backoff -----
+chrome.runtime.onInstalled.addListener(() => {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+});
+chrome.runtime.onStartup.addListener(() => {
+    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+});
+// Also set immediately when the worker spins up.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
-let ws = null;
-let reconnectAttempts = 0;
-let reconnectTimer = null;
-let connected = false;
+// ---------- run state ----------
 
-function setStatus(next) {
-    connected = next;
-    chrome.storage.local.set({ connected: next, last_change: Date.now() });
-    chrome.runtime.sendMessage({ type: 'status', connected: next }).catch(() => {});
-}
+let running = false;
+let abortRequested = false;
+let activePort = null;
+let runController = null; // aborts the in-flight Gemini fetch when the user hits Stop
 
-function scheduleReconnect() {
-    if (reconnectTimer) return;
-    reconnectAttempts += 1;
-    const delay = Math.min(1000 * reconnectAttempts, 5000);
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-    }, delay);
-}
-
-function connect() {
-    try {
-        ws = new WebSocket(BACKEND_WS);
-    } catch (e) {
-        console.error('[copilot] WS construct failed', e);
-        scheduleReconnect();
-        return;
+function post(msg) {
+    if (activePort) {
+        try { activePort.postMessage(msg); } catch (e) { /* panel gone */ }
     }
+}
+function status(message, level = 'info') { post({ type: 'status', level, message }); }
 
-    ws.onopen = () => {
-        console.log('[copilot] WS connected');
-        reconnectAttempts = 0;
-        setStatus(true);
-    };
+chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== 'copilot') return;
+    activePort = port;
+    port.postMessage({ type: 'state', running });
 
-    ws.onmessage = async (event) => {
-        let msg;
-        try { msg = JSON.parse(event.data); } catch (e) {
-            console.warn('[copilot] non-JSON from backend', event.data);
-            return;
+    port.onMessage.addListener(async (msg) => {
+        if (!msg || !msg.type) return;
+        if (msg.type === 'start') {
+            if (running) { status('A run is already in progress.', 'warn'); return; }
+            startRun(msg.mode || 'fill');
+        } else if (msg.type === 'stop') {
+            abortRequested = true;
+            if (runController) { try { runController.abort(); } catch (e) { /* noop */ } }
+            status('Stop requested - cancelling current step...', 'warn');
+        } else if (msg.type === 'test_key') {
+            handleTestKey();
+        } else if (msg.type === 'get_state') {
+            port.postMessage({ type: 'state', running });
         }
-        await handleCommand(msg);
-    };
+    });
 
-    ws.onerror = (e) => {
-        console.warn('[copilot] WS error', e);
-    };
-
-    ws.onclose = () => {
-        console.log('[copilot] WS closed');
-        setStatus(false);
-        ws = null;
-        scheduleReconnect();
-    };
-}
-
-function sendResponse(id, ok, payload) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const msg = ok
-        ? { id, ok: true, result: payload }
-        : { id, ok: false, error: String(payload) };
-    ws.send(JSON.stringify(msg));
-}
-
-// ----- command router (allowlist enforced) -----
-
-async function handleCommand(msg) {
-    const { id, cmd } = msg;
-    if (!id || !cmd) {
-        console.warn('[copilot] malformed message', msg);
-        return;
-    }
-
-    if (!ALLOWED_CMDS.has(cmd)) {
-        console.error('[copilot] BLOCKED disallowed cmd:', cmd);
-        sendResponse(id, false, `Disallowed cmd '${cmd}' — closed allowlist`);
-        return;
-    }
-
-    try {
-        let result;
-        switch (cmd) {
-            case 'active_tab_url':
-                result = (await getActiveTab()).url || '';
-                break;
-            case 'screenshot':
-                result = await captureActiveTab();
-                break;
-            case 'capture_scroll_bundle':
-                result = await captureScrollBundle(msg.max_frames || 4);
-                break;
-            case 'get_html':
-                result = await runInActiveTab(() => document.documentElement.outerHTML);
-                break;
-            case 'fill':
-                result = await runInActiveTab(domFill, [msg.selector, msg.value]);
-                break;
-            case 'click':
-                result = await runInActiveTab(domClick, [msg.selector]);
-                break;
-            case 'select':
-                result = await runInActiveTab(domSelect, [msg.selector, msg.value]);
-                break;
+    port.onDisconnect.addListener(() => {
+        if (activePort === port) activePort = null;
+        // If the panel closes mid-run, stop cleanly (the worker may be suspended anyway).
+        if (running) {
+            abortRequested = true;
+            if (runController) { try { runController.abort(); } catch (e) { /* noop */ } }
         }
-        sendResponse(id, true, result);
+    });
+});
+
+async function handleTestKey() {
+    try {
+        const { geminiApiKey, geminiModel } = await getSettings();
+        status('Testing Gemini API key...');
+        const ok = await testApiKey({ apiKey: geminiApiKey, model: geminiModel });
+        post({ type: 'key_result', ok });
+        status(ok ? 'API key works.' : 'API key test failed.', ok ? 'success' : 'error');
     } catch (e) {
-        console.error('[copilot] cmd failed', cmd, e);
-        sendResponse(id, false, e?.message || String(e));
+        post({ type: 'key_result', ok: false, error: e.message });
+        status(`API key test failed: ${e.message}`, 'error');
     }
 }
 
-// ----- helpers -----
+// ---------- settings ----------
+
+async function getSettings() {
+    let managed = {};
+    try {
+        if (chrome.storage.managed) {
+            managed = await chrome.storage.managed.get(['geminiApiKey', 'geminiModel']);
+        }
+    } catch (e) {
+        console.warn('[copilot] managed storage not available or blocked:', e);
+    }
+    const local = await chrome.storage.local.get(['geminiApiKey', 'geminiModel']);
+    return {
+        geminiApiKey: managed.geminiApiKey || local.geminiApiKey || '',
+        geminiModel: managed.geminiModel || local.geminiModel || 'gemini-2.5-pro',
+        isManaged: !!(managed.geminiApiKey || managed.geminiModel),
+    };
+}
+
+// ---------- prompt (SOP / RAG) loading ----------
+
+let _systemInstruction = null;
+async function loadSystemInstruction() {
+    if (_systemInstruction) return _systemInstruction;
+    const files = ['prompts/system.md', 'prompts/sop_rules.md', 'prompts/doc_types.md'];
+    const texts = [];
+    for (const f of files) {
+        try {
+            const res = await fetch(chrome.runtime.getURL(f));
+            texts.push(await res.text());
+        } catch (e) {
+            console.warn('[copilot] could not load', f, e);
+        }
+    }
+    _systemInstruction = texts.join('\n\n---\n\n');
+    return _systemInstruction;
+}
+
+// ---------- tab helpers ----------
 
 async function getActiveTab() {
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab || !tab.id) throw new Error('No active tab');
+    if (!tab || !tab.id) throw new Error('No active tab. Click into the Ephesoft tab and try again.');
+    if (/^(chrome|edge|about|chrome-extension):/i.test(tab.url || '')) {
+        throw new Error('The active tab is a browser page. Open the Ephesoft web page, then run again.');
+    }
     return tab;
 }
 
-async function captureActiveTab() {
-    const tab = await getActiveTab();
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    // strip "data:image/png;base64," prefix → raw base64
-    const idx = dataUrl.indexOf('base64,');
-    return idx >= 0 ? dataUrl.slice(idx + 'base64,'.length) : dataUrl;
+function friendlyInjectError(message) {
+    const m = String(message || '');
+    if (/cannot be scripted|chrome:\/\/|extension gallery|showing error page|cannot access/i.test(m)) {
+        return 'This page cannot be automated by extensions (a browser/PDF/error page or a restricted URL). '
+            + 'Open the Ephesoft web app in a normal tab and try again.';
+    }
+    return `Cannot reach the page: ${m}`;
 }
 
-async function captureScrollBundle(maxFrames = 4) {
-    const tab = await getActiveTab();
-    const metrics = await runInActiveTab(getScrollMetrics);
-    const totalHeight = Math.max(metrics.totalHeight || 0, metrics.viewportHeight || 0);
-    const viewportHeight = Math.max(metrics.viewportHeight || 1, 1);
-    const originalY = metrics.scrollY || 0;
-
-    const frames = Math.max(1, Math.min(Number(maxFrames) || 4, 8));
-    const steps = Math.min(frames, Math.max(1, Math.ceil(totalHeight / viewportHeight)));
-    const positions = [];
-    const maxY = Math.max(0, totalHeight - viewportHeight);
-
-    if (steps === 1) {
-        positions.push(originalY);
-    } else {
-        for (let i = 0; i < steps; i += 1) {
-            const y = Math.round((i / (steps - 1)) * maxY);
-            positions.push(y);
-        }
+async function injectContentScript(tabId) {
+    try {
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['content_script.js'] });
+    } catch (injErr) {
+        throw new Error(friendlyInjectError(injErr && injErr.message));
     }
+}
 
-    const screenshots = [];
-    const html_chunks = [];
+async function ensureContentScript(tabId) {
+    try {
+        const r = await chrome.tabs.sendMessage(tabId, { cmd: 'ping' });
+        if (r && r.ok) return;
+    } catch (e) { /* not injected yet */ }
+    await injectContentScript(tabId);
+}
 
-    for (const y of positions) {
-        await runInActiveTab(setScrollY, [y]);
-        await sleep(180);
+async function sendToTab(tabId, payload) {
+    try {
+        return await chrome.tabs.sendMessage(tabId, payload);
+    } catch (e) {
+        // Content script may not be present (fresh navigation / first load). Inject + retry.
+        await injectContentScript(tabId);
+        return await chrome.tabs.sendMessage(tabId, payload);
+    }
+}
 
-        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+async function captureViewport(windowId) {
+    try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
         const idx = dataUrl.indexOf('base64,');
-        screenshots.push(idx >= 0 ? dataUrl.slice(idx + 'base64,'.length) : dataUrl);
-
-        const chunk = await runInActiveTab(getVisibleHtmlChunk);
-        html_chunks.push(chunk || "");
+        return idx >= 0 ? dataUrl.slice(idx + 'base64,'.length) : dataUrl;
+    } catch (e) {
+        // VM/focus issues - fall back to HTML-only by returning empty.
+        console.warn('[copilot] captureVisibleTab failed:', e?.message || e);
+        return '';
     }
-
-    await runInActiveTab(setScrollY, [originalY]);
-
-    return {
-        screenshots,
-        html_chunks,
-        meta: { steps, totalHeight, viewportHeight, originalY },
-    };
 }
 
-async function runInActiveTab(func, args = []) {
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ---------- the agent loop ----------
+
+async function startRun(mode) {
+    running = true;
+    abortRequested = false;
+    runController = new AbortController();
+    post({ type: 'state', running: true });
+    post({ type: 'run_started', mode });
+    try {
+        await runAgent(mode);
+    } catch (e) {
+        // A user Stop (or panel close) aborts the in-flight fetch; treat as graceful stop.
+        if (abortRequested || (e && e.name === 'AbortError')) {
+            status('Stopped by user.', 'warn');
+            post({ type: 'done', outcome: 'stopped' });
+        } else {
+            status(`Error: ${e.message}`, 'error');
+            post({ type: 'done', outcome: 'error', message: e.message });
+        }
+    } finally {
+        running = false;
+        abortRequested = false;
+        runController = null;
+        post({ type: 'state', running: false });
+    }
+}
+
+function taskHeader(mode) {
+    if (mode === 'next') {
+        return 'TASK MODE: NEXT. Open the oldest unassigned, not-in-progress batch from the batch list. '
+            + 'Use click for batch rows and for batch-list pagination. When the batch has opened, call complete.';
+    }
+    return 'TASK MODE: FILL. Read the document on screen and fill all Ephesoft fields per the SOP, '
+        + 'then verify and call complete. Scroll the document viewer / fields panel as needed.';
+}
+
+function buildUserText(mode, o, history) {
+    const hist = history.length
+        ? history.map((h, i) => `${i + 1}. ${h}`).join('\n')
+        : '(none yet)';
+    return [
+        taskHeader(mode),
+        '',
+        `CURRENT URL: ${o.url}`,
+        `PAGE TITLE: ${o.title}`,
+        `SCROLL: y=${o.scroll.y} maxY=${o.scroll.maxY} atBottom=${o.scroll.atBottom} (pageHeight=${o.scroll.pageHeight}, viewport=${o.scroll.viewportHeight})`,
+        '',
+        'ACTIONS TAKEN SO FAR (with results):',
+        hist,
+        '',
+        'VISIBLE PAGE TEXT (truncated):',
+        o.text,
+        '',
+        'PAGE HTML (trimmed - scroll to load more if an element is missing):',
+        o.html,
+        '',
+        'Respond with EXACTLY ONE next action as a single JSON object per the system instructions.',
+    ].join('\n');
+}
+
+function summarizeStep(action, res) {
+    const tgt = action.selector || (action.direction ? `(${action.direction})` : '');
+    const val = action.value != null ? ` = "${action.value}"` : '';
+    const outcome = res && res.ok ? 'ok' : `ERROR: ${res && res.error ? res.error : 'unknown'}`;
+    return `${action.action} ${tgt}${val} -> ${outcome}`;
+}
+
+async function executeAction(tabId, action) {
+    switch (action.action) {
+        case 'fill':
+            return sendToTab(tabId, { cmd: 'fill', selector: action.selector, value: action.value });
+        case 'select':
+            return sendToTab(tabId, { cmd: 'select', selector: action.selector, value: action.value });
+        case 'click':
+            return sendToTab(tabId, { cmd: 'click', selector: action.selector });
+        case 'scroll':
+            return sendToTab(tabId, { cmd: 'scroll', selector: action.selector, direction: action.direction });
+        case 'fill_row':
+            return sendToTab(tabId, { cmd: 'fill_row', row_selector: action.selector, values: action.values || [] });
+        case 'exists':
+            return sendToTab(tabId, { cmd: 'exists', selector: action.selector });
+        default:
+            return { ok: false, error: `Unknown action: ${action.action}` };
+    }
+}
+
+async function runAgent(mode) {
+    const { geminiApiKey, geminiModel } = await getSettings();
+    if (!geminiApiKey) throw new Error('No Gemini API key set. Open Settings and paste your key.');
+
+    const systemInstruction = await loadSystemInstruction();
     const tab = await getActiveTab();
-    const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func,
-        args,
-    });
-    return result;
-}
+    status(`Connecting to page: ${tab.title || tab.url}`);
+    await ensureContentScript(tab.id);
 
-// ----- DOM operations executed in the page (closed set) -----
+    const history = [];
+    const maxSteps = mode === 'fill' ? 60 : 20;
+    const recent = [];           // ring buffer of recent action keys
+    let lastScrollY = null;      // to detect scrolls that no longer move the page
 
-function domFill(selector, value) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
-    if (!('value' in el) && el.contentEditable !== 'true') {
-        throw new Error(`Element ${selector} is not fillable`);
-    }
-    if ('value' in el) {
-        const proto = el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-        setter.call(el, value);
-    } else {
-        el.textContent = value;
-    }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
-}
-
-function domClick(selector) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
-    // Defense in depth: never click anything that looks like Validate/Skip in the page.
-    const label = (el.innerText || el.value || el.getAttribute('aria-label') || '').toLowerCase();
-    const banned = ['validate', 'skip batch', 'merge documents', 'split documents'];
-    if (banned.some(b => label.includes(b))) {
-        throw new Error(`Refusing to click '${label.trim()}' — banned label`);
-    }
-    el.click();
-    return true;
-}
-
-function domSelect(selector, value) {
-    const el = document.querySelector(selector);
-    if (!el) throw new Error(`Element not found: ${selector}`);
-    if (!(el instanceof HTMLSelectElement)) {
-        // Fall back to setting value directly for custom selects
-        if ('value' in el) {
-            el.value = value;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
+    for (let step = 1; step <= maxSteps; step += 1) {
+        if (abortRequested) {
+            status('Stopped by user.', 'warn');
+            post({ type: 'done', outcome: 'stopped' });
+            return;
         }
-        throw new Error(`Element ${selector} is not a select`);
-    }
-    let matched = false;
-    for (const opt of el.options) {
-        if (opt.value === value || opt.text === value || opt.text.toLowerCase() === String(value).toLowerCase()) {
-            el.value = opt.value;
-            matched = true;
-            break;
+
+        status(`Observing page (step ${step}/${maxSteps})...`);
+        const obsResp = await sendToTab(tab.id, { cmd: 'observe' });
+        if (!obsResp || !obsResp.ok) throw new Error(`Could not read page: ${obsResp && obsResp.error}`);
+        const o = obsResp.result;
+
+        const shot = await captureViewport(tab.windowId);
+        const userText = buildUserText(mode, o, history);
+
+        status('Thinking (Gemini)...');
+        const signal = runController ? runController.signal : undefined;
+        const raw = await callGemini({
+            apiKey: geminiApiKey,
+            model: geminiModel,
+            systemInstruction,
+            userText,
+            imageB64: shot || undefined,
+            signal,
+        });
+
+        let action;
+        try {
+            action = parseJsonResponse(raw);
+        } catch (e) {
+            if (abortRequested) continue;
+            // One corrective retry before giving up - models occasionally wrap JSON in prose.
+            status('Model output was not clean JSON - retrying once...', 'warn');
+            const raw2 = await callGemini({
+                apiKey: geminiApiKey,
+                model: geminiModel,
+                systemInstruction,
+                userText: userText + '\n\nYour previous reply was not valid JSON. Respond with ONLY a single JSON object, no prose, no code fences.',
+                imageB64: shot || undefined,
+                signal,
+            });
+            try { action = parseJsonResponse(raw2); }
+            catch (e2) { throw new Error(`Model returned unparseable output: ${e2.message}`); }
         }
+        if (!action || typeof action !== 'object' || !action.action) {
+            throw new Error('Model response had no "action" field.');
+        }
+
+        if (action.note) status(action.note);
+
+        if (action.action === 'complete') {
+            post({
+                type: 'done',
+                outcome: 'complete',
+                doc_type: action.doc_type || null,
+                red_fields: action.red_fields || [],
+                flags: action.flags || [],
+                message: action.note || 'Completed. Ready for human review.',
+            });
+            status('Complete - ready for human review.', 'success');
+            return;
+        }
+        if (action.action === 'incomplete') {
+            post({
+                type: 'done',
+                outcome: 'incomplete',
+                reason: action.reason || 'Missing Information',
+                flags: action.flags || [],
+                message: action.note || action.reason || 'Marked incomplete.',
+            });
+            status(`Incomplete: ${action.reason || 'Missing Information'}`, 'warn');
+            return;
+        }
+
+        // --- loop guards (let legit repeats like scrolling through) ---
+        const key = JSON.stringify([action.action, action.selector, action.value, action.direction]);
+        recent.push(key);
+        if (recent.length > 8) recent.shift();
+        let consecutive = 0;
+        for (let i = recent.length - 1; i >= 0 && recent[i] === key; i -= 1) consecutive += 1;
+
+        if (action.action === 'scroll') {
+            // Scrolling repeatedly is normal - only stop if the page stopped moving.
+            if (consecutive >= 3 && lastScrollY != null && o.scroll && o.scroll.y === lastScrollY) {
+                throw new Error('Scrolling no longer moves the page (reached the end). Stopping.');
+            }
+        } else if (consecutive >= 3) {
+            throw new Error(`Stuck repeating the same action 3x: ${summarizeStep(action, { ok: true })}`);
+        }
+
+        // Oscillation: two actions ping-ponging (A,B,A,B,A,B).
+        if (recent.length >= 6) {
+            const s = recent.slice(-6);
+            if (s[0] !== s[1] && s[0] === s[2] && s[2] === s[4] && s[1] === s[3] && s[3] === s[5]) {
+                throw new Error('Stuck oscillating between two actions. Stopping for human review.');
+            }
+        }
+        lastScrollY = o.scroll ? o.scroll.y : lastScrollY;
+
+        post({ type: 'step', step, action });
+        const res = await executeAction(tab.id, action);
+        const line = summarizeStep(action, res);
+        history.push(line);
+        status(line, res && res.ok ? 'info' : 'warn');
+
+        // Let the page settle (longer after clicks that may navigate).
+        await sleep(action.action === 'click' ? 1000 : 500);
     }
-    if (!matched) throw new Error(`No option matches '${value}' in ${selector}`);
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
+
+    throw new Error('Reached the step limit without completing. Check the page state and retry.');
 }
-
-function getScrollMetrics() {
-    const doc = document.documentElement;
-    return {
-        totalHeight: Math.max(doc.scrollHeight, document.body ? document.body.scrollHeight : 0),
-        viewportHeight: window.innerHeight || doc.clientHeight || 0,
-        scrollY: window.scrollY || doc.scrollTop || 0,
-    };
-}
-
-function setScrollY(y) {
-    window.scrollTo({ top: Number(y) || 0, behavior: 'auto' });
-    return true;
-}
-
-function getVisibleHtmlChunk() {
-    const viewportTop = window.scrollY || 0;
-    const viewportBottom = viewportTop + window.innerHeight;
-    const nodes = Array.from(document.querySelectorAll('body *'));
-    const out = [];
-
-    for (const el of nodes) {
-        if (!el || !el.getBoundingClientRect) continue;
-        const rect = el.getBoundingClientRect();
-        const top = rect.top + viewportTop;
-        const bottom = rect.bottom + viewportTop;
-        if (bottom < viewportTop || top > viewportBottom) continue;
-        if (rect.width === 0 && rect.height === 0) continue;
-        const html = el.outerHTML || "";
-        if (html.trim()) out.push(html);
-        if (out.join('\n').length > 12000) break;
-    }
-    return out.join('\n').slice(0, 12000);
-}
-
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ----- popup ↔ worker messaging -----
-
-chrome.runtime.onMessage.addListener((msg, _sender, sendReplyFn) => {
-    if (msg && msg.type === 'get_status') {
-        sendReplyFn({ connected });
-    }
-    if (msg && msg.type === 'reconnect') {
-        if (ws) try { ws.close(); } catch {}
-        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        reconnectAttempts = 0;
-        connect();
-        sendReplyFn({ ok: true });
-    }
-    return true;
-});
-
-// ----- start -----
-
-connect();

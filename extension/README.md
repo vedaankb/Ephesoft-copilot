@@ -1,35 +1,37 @@
-# Ephesoft Copilot — Browser Extension
+# Ephesoft Copilot - Chrome Extension (V2)
 
-Acts as the "DOM hands" for the Electron panel.
+A self-contained Chrome extension. No backend, no Electron, no Playwright. It reads the
+document on the active Ephesoft tab with Gemini Vision and fills the fields, one safe action
+at a time. The human always performs Validate.
 
 ## Install (dev / unpacked)
 
-1. Make sure the FastAPI backend is running (`.venv/bin/python run.py` or
-   the Electron app, which spawns it).
-2. Open `chrome://extensions` (works in Edge too).
-3. Toggle **Developer mode** on (top right).
-4. Click **Load unpacked** and pick this `extension/` folder.
-5. The extension's popup should show **Connected to backend** within a
-   second or two. The Electron panel's `ext` dot will turn green.
+1. Open `chrome://extensions` (Chrome 114+; works in Edge too).
+2. Toggle **Developer mode** on (top right).
+3. Click **Load unpacked** and pick this `extension/` folder.
+4. Click the extension's toolbar icon to open the side panel.
+5. In **Settings**, paste your Gemini API key (from https://aistudio.google.com/apikey),
+   pick a model, click **Test key**, then **Save**.
 
-## What it does
+## How it works
 
-- Connects to `ws://127.0.0.1:8000/ws/extension`.
-- Receives a closed set of commands (`fill`, `click`, `select`, `get_html`,
-  `screenshot`, `active_tab_url`).
-- Anything outside that list is rejected before it reaches the page.
-- It also refuses to click any element whose label looks like Validate /
-  Skip / Merge / Split — defense in depth.
+- **sidepanel.\*** - the UI (Fill / Next / Stop, activity feed, settings).
+- **service_worker.js** - the agent loop: capture screenshot + page text, ask Gemini for the
+  next action, execute it, repeat until complete/incomplete.
+- **content_script.js** - reads the page and performs fill/select/click/scroll with realistic
+  events; enforces a runtime guard that blocks Validate/Skip/Merge/Split/Submit clicks.
+- **lib/gemini.js** - tiny REST client for the Gemini API (plain HTTPS).
+- **prompts/** - the SOP and document-type rules, injected into every Gemini call (RAG).
 
-## What it does not do
+## Safety
 
-- It does **not** read the user's API key.
-- It does **not** call Gemini directly.
-- It does **not** decide what to fill — only translates a single low-level
-  command at a time.
-- It does **not** click Validate. Ever.
+- Never clicks Validate / Skip / Merge / Split / Submit - blocked in the content script.
+- The API key is stored in `chrome.storage.local` for this profile and sent only to Google's
+  Gemini API over HTTPS.
+- Stops on the Stop button after the current step.
 
-## Icons
+## Permissions
 
-The manifest references `icon16.png`, `icon48.png`, `icon128.png`. Chrome
-will load fine without them; add real icons later before publishing.
+- `sidePanel`, `scripting`, `tabs`, `activeTab`, `storage`
+- `host_permissions`: `<all_urls>` (read/act on the Ephesoft page + screenshots) and
+  `https://generativelanguage.googleapis.com/*` (Gemini API).

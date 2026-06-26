@@ -1,1 +1,0 @@
-"""Ephesoft Copilot backend server."""

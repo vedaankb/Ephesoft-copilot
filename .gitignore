@@ -1,12 +1,20 @@
+# Build output
+dist/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+
+# Node (only used by the packaging script; no deps required)
+node_modules/
+
+# Local secrets / config (never commit API keys)
 config.json
 .env
-browser-data/
-*.session
-logs/
+*.local
+
+# Stray Python artifacts from the removed V1 stack
+.venv/
+.pytest_cache/
 __pycache__/
 *.pyc
-node_modules/
-dist/
-dist-server/
-build/
-fixtures/sample_docs/
