@@ -47,6 +47,13 @@
         <details id="settings" class="settings">
             <summary>Settings</summary>
             <div class="settings-body">
+                <label for="licenseKey">License Key</label>
+                <div class="key-row">
+                    <input id="licenseKey" type="password" placeholder="Paste license key..." autocomplete="off" spellcheck="false">
+                    <button id="toggleLicense" class="link" type="button">show</button>
+                </div>
+                <div id="licenseStatus" class="license-status">No license loaded</div>
+
                 <label for="apiKey">Gemini API key</label>
                 <div class="key-row">
                     <input id="apiKey" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false">
@@ -71,6 +78,6 @@
         </details>
     </main>
 
-    <script src="sidepanel.js"></script>
+    <script type="module" src="sidepanel.js"></script>
 </body>
 </html>

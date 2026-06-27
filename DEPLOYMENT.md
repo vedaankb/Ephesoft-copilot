@@ -11,6 +11,7 @@ Ephesoft Copilot (V2) is a **pure Chrome/Edge extension** (Manifest V3).
 * **Network Security**: It communicates directly with the Google Gemini API via standard HTTPS requests (`https://generativelanguage.googleapis.com/*`).
 * **Data Privacy**: No document data, screenshots, or credentials are sent to any third-party servers other than the configured Gemini API endpoint.
 * **Storage**: Settings (API keys) are stored securely using the browser's sandboxed storage (`chrome.storage.local` or `chrome.storage.managed`).
+* **Offline Cryptographic Licensing**: To safeguard Intellectual Property and control client access, the extension utilizes a 100% offline asymmetric cryptographic license verification system. It locks the extension to specific expiration dates without making any external cloud API calls.
 
 ---
 
@@ -109,16 +110,44 @@ If using ADMX templates, you can configure these settings under the **Extension 
 
 ---
 
-## 5. Private Self-Hosting (Alternative to Web Stores)
+## 5. Offline Cryptographic Licensing (IP Protection)
+
+To safeguard your Intellectual Property and prevent clients from distributing or using the extension without authorization, the extension enforces a **100% Offline Cryptographic Licensing** mechanism.
+
+### How it Works:
+1. **Asymmetric Cryptography**: The extension embeds an asymmetric **ECDSA (P-256)** public key. Only you (the creator) possess the secret private key.
+2. **Signed License Keys**: When onboarding a client, you generate a cryptographically signed license key containing their name and expiration date.
+3. **Offline Verification**: The extension verifies the license key's signature using the embedded public key natively via the browser's Web Crypto API. This is 100% offline and requires no cloud database or licensing server.
+4. **Access Enforcement**: The service worker and sidepanel enforce:
+   * **Expiration Lock**: The extension will block execution if the current system date is past the `expires` date.
+5. **Backdoor Master Key**: For developer testing or emergency bypasses, entering the literal string `1` as the license key acts as an override, granting unlimited access with a mock developer profile.
+
+### How to Generate a License Key for a Client:
+Run the license generator script on your development machine:
+
+```bash
+node scripts/generate_license.js --client "Client Name" --expires "YYYY-MM-DD"
+```
+
+**Example**:
+```bash
+node scripts/generate_license.js --client "Wombat BPO" --expires "2027-06-30"
+```
+
+Copy the generated Base64 block and send it to your client. They must paste it into the **License Key** field in the Settings panel of the Copilot to activate the extension.
+
+---
+
+## 6. Private Self-Hosting (Alternative to Web Stores)
 
 If your corporate policy prohibits publishing to public web stores (even as unlisted), you can host the extension on an internal IIS, Apache, or Nginx web server.
 
-### Step 5.1: Package the Extension
+### Step 6.1: Package the Extension
 1. Package the extension into a `.crx` file using Chrome's built-in packager:
    `chrome://extensions > Pack extension > select the "extension" folder`.
 2. This generates a `.crx` file and a `.pem` private key file. Keep the `.pem` file secure to sign future updates.
 
-### Step 5.2: Create the Update Manifest (`update.xml`)
+### Step 6.2: Create the Update Manifest (`update.xml`)
 Host an XML file on your internal server alongside the `.crx` file:
 
 ```xml
@@ -130,7 +159,7 @@ Host an XML file on your internal server alongside the `.crx` file:
 </gupdate>
 ```
 
-### Step 5.3: Deploy via GPO
+### Step 6.3: Deploy via GPO
 When force-installing the extension (Section 3), point the GPO/Registry to your internal update manifest instead of the public store:
 
 ```text
@@ -139,7 +168,7 @@ When force-installing the extension (Section 3), point the GPO/Registry to your 
 
 ---
 
-## 6. Troubleshooting & Support
+## 7. Troubleshooting & Support
 
 * **Extension not loading**: Verify that Developer Mode is allowed by GPO on pilot machines, or use the GPO Force-Install method.
 * **Network / Proxy Blocks**: Ensure that your corporate proxy allows outbound HTTPS requests to:

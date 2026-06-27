@@ -12,6 +12,9 @@ node_modules/
 config.json
 .env
 *.local
+keys/
+private.pem
+public.pem
 
 # Stray Python artifacts from the removed V1 stack
 .venv/

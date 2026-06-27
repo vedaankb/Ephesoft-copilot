@@ -10,6 +10,7 @@
  */
 
 import { callGemini, parseJsonResponse, testApiKey } from './lib/gemini.js';
+import { verifyLicenseOffline } from './lib/license.js';
 
 // ---------- side panel wiring ----------
 
@@ -265,11 +266,19 @@ async function executeAction(tabId, action) {
 }
 
 async function runAgent(mode) {
+    // 1. Double-check license offline in service worker
+    const { licenseKey } = await chrome.storage.local.get(['licenseKey']);
+    if (!licenseKey) {
+        throw new Error('No License Key provided. Enter your license key in Settings.');
+    }
+    const license = await verifyLicenseOffline(licenseKey);
+
     const { geminiApiKey, geminiModel } = await getSettings();
     if (!geminiApiKey) throw new Error('No Gemini API key set. Open Settings and paste your key.');
 
     const systemInstruction = await loadSystemInstruction();
     const tab = await getActiveTab();
+
     status(`Connecting to page: ${tab.title || tab.url}`);
     await ensureContentScript(tab.id);
 

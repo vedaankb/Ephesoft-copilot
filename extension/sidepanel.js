@@ -1,5 +1,7 @@
 /* Ephesoft Copilot - side panel UI controller. */
 
+import { verifyLicenseOffline } from './lib/license.js';
+
 const els = {
     fill: document.getElementById('fillBtn'),
     next: document.getElementById('nextBtn'),
@@ -11,6 +13,9 @@ const els = {
     resultBadge: document.getElementById('resultBadge'),
     resultTitle: document.getElementById('resultTitle'),
     resultDetail: document.getElementById('resultDetail'),
+    licenseKey: document.getElementById('licenseKey'),
+    toggleLicense: document.getElementById('toggleLicense'),
+    licenseStatus: document.getElementById('licenseStatus'),
     apiKey: document.getElementById('apiKey'),
     toggleKey: document.getElementById('toggleKey'),
     model: document.getElementById('model'),
@@ -151,6 +156,24 @@ els.stop.addEventListener('click', () => send({ type: 'stop' }));
 els.clearFeed.addEventListener('click', () => { els.feed.innerHTML = ''; });
 
 async function start(mode) {
+    // 1. Verify License offline
+    const { licenseKey } = await chrome.storage.local.get(['licenseKey']);
+    if (!licenseKey) {
+        els.settings.open = true;
+        addFeed('Enter a valid License Key in Settings to run the Copilot.', 'error');
+        return;
+    }
+
+    let license;
+    try {
+        license = await verifyLicenseOffline(licenseKey);
+    } catch (e) {
+        els.settings.open = true;
+        addFeed(`License check failed: ${e.message}`, 'error');
+        return;
+    }
+
+    // 2. Verify API Key
     let managed = {};
     try {
         if (chrome.storage.managed) {
@@ -171,6 +194,12 @@ async function start(mode) {
 
 // ---------- settings ----------
 
+els.toggleLicense.addEventListener('click', () => {
+    const showing = els.licenseKey.type === 'text';
+    els.licenseKey.type = showing ? 'password' : 'text';
+    els.toggleLicense.textContent = showing ? 'show' : 'hide';
+});
+
 els.toggleKey.addEventListener('click', () => {
     const showing = els.apiKey.type === 'text';
     els.apiKey.type = showing ? 'password' : 'text';
@@ -178,7 +207,28 @@ els.toggleKey.addEventListener('click', () => {
 });
 
 els.saveSettings.addEventListener('click', async () => {
+    const lKey = els.licenseKey.value.trim();
+    let statusClass = 'invalid';
+    let statusText = 'Invalid License';
+
+    if (lKey) {
+        try {
+            const license = await verifyLicenseOffline(lKey);
+            statusClass = 'valid';
+            statusText = `Valid: ${license.client} (Expires ${license.expires})`;
+        } catch (e) {
+            statusText = e.message;
+        }
+    } else {
+        statusText = 'No license loaded';
+        statusClass = '';
+    }
+
+    els.licenseStatus.className = 'license-status ' + statusClass;
+    els.licenseStatus.textContent = statusText;
+
     await chrome.storage.local.set({
+        licenseKey: lKey,
         geminiApiKey: els.apiKey.value.trim(),
         geminiModel: els.model.value,
     });
@@ -189,6 +239,7 @@ els.saveSettings.addEventListener('click', async () => {
 
 els.testKey.addEventListener('click', async () => {
     await chrome.storage.local.set({
+        licenseKey: els.licenseKey.value.trim(),
         geminiApiKey: els.apiKey.value.trim(),
         geminiModel: els.model.value,
     });
@@ -207,13 +258,33 @@ async function loadSettings() {
         console.warn('[copilot] managed storage not available:', e);
     }
 
-    const local = await chrome.storage.local.get(['geminiApiKey', 'geminiModel']);
+    const local = await chrome.storage.local.get(['licenseKey', 'geminiApiKey', 'geminiModel']);
     
+    const lKey = local.licenseKey || '';
     const apiKey = managed.geminiApiKey || local.geminiApiKey || '';
     const model = managed.geminiModel || local.geminiModel || 'gemini-2.5-pro';
 
+    els.licenseKey.value = lKey;
     els.apiKey.value = apiKey;
     els.model.value = model;
+
+    // Validate license on load
+    let statusClass = 'invalid';
+    let statusText = 'Invalid License';
+    if (lKey) {
+        try {
+            const license = await verifyLicenseOffline(lKey);
+            statusClass = 'valid';
+            statusText = `Valid: ${license.client} (Expires ${license.expires})`;
+        } catch (e) {
+            statusText = e.message;
+        }
+    } else {
+        statusText = 'No license loaded';
+        statusClass = '';
+    }
+    els.licenseStatus.className = 'license-status ' + statusClass;
+    els.licenseStatus.textContent = statusText;
 
     if (managed.geminiApiKey || managed.geminiModel) {
         // Settings are managed by IT policy
@@ -224,7 +295,7 @@ async function loadSettings() {
         els.saveMsg.style.color = 'var(--muted)';
         els.saveMsg.textContent = 'Managed by IT policy';
     } else {
-        if (!apiKey) els.settings.open = true;
+        if (!lKey || !apiKey) els.settings.open = true;
     }
 }
 
