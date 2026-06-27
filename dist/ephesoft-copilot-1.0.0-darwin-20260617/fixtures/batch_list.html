@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Ephesoft - Batch List (Mock)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background: #007bff;
+            color: white;
+        }
+        tr:hover {
+            background: #f8f9fa;
+            cursor: pointer;
+        }
+        .status-available {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .status-in-progress {
+            color: #ffc107;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Batch List</h1>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Batch ID</th>
+                    <th>Created At</th>
+                    <th>Status</th>
+                    <th>Assigned To</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr data-batch-id="EPH-00231" data-status="available" data-assigned-to="">
+                    <td>EPH-00231</td>
+                    <td>2024-03-15T08:00:00Z</td>
+                    <td class="status-available">Available</td>
+                    <td>-</td>
+                </tr>
+                <tr data-batch-id="EPH-00232" data-status="available" data-assigned-to="">
+                    <td>EPH-00232</td>
+                    <td>2024-03-15T08:15:00Z</td>
+                    <td class="status-available">Available</td>
+                    <td>-</td>
+                </tr>
+                <tr data-batch-id="EPH-00233" data-status="in_progress" data-assigned-to="user@example.com">
+                    <td>EPH-00233</td>
+                    <td>2024-03-15T08:30:00Z</td>
+                    <td class="status-in-progress">In Progress</td>
+                    <td>user@example.com</td>
+                </tr>
+                <tr data-batch-id="EPH-00234" data-status="available" data-assigned-to="">
+                    <td>EPH-00234</td>
+                    <td>2024-03-15T09:00:00Z</td>
+                    <td class="status-available">Available</td>
+                    <td>-</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>

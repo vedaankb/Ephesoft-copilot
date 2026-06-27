@@ -1,5 +1,9 @@
-# Build output
-dist/
+# Build output (keep icons in repo; ignore packaged zips only)
+dist/*.zip
+dist/build/
+
+# Generated icons are committed after first run; optional regen via scripts/generate_icons.js
+# extension/icons/
 
 # OS / editor cruft
 .DS_Store
@@ -8,13 +12,17 @@ dist/
 # Node (only used by the packaging script; no deps required)
 node_modules/
 
-# Local secrets / config (never commit API keys)
+# Local secrets / config (never commit API keys or signing keys)
 config.json
 .env
 *.local
 keys/
 private.pem
 public.pem
+
+# Pilot-only docs with license keys — share directly with clients, not via git
+QUADRANTECH_TESTING.md
+licenses/
 
 # Stray Python artifacts from the removed V1 stack
 .venv/

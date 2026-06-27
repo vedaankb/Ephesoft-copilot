@@ -1,0 +1,78 @@
+{
+  "name": "ephesoft-copilot",
+  "version": "1.0.0",
+  "description": "Floating desktop tool for Ephesoft data entry automation",
+  "main": "electron/main.js",
+  "author": "Ephesoft Copilot",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build:package": "bash scripts/build_package.sh",
+    "build:server": "bash scripts/build_server.sh",
+    "build:mac": "bash scripts/build_desktop.sh mac",
+    "build:win": "bash scripts/build_desktop.sh win",
+    "build:desktop": "bash scripts/build_desktop.sh"
+  },
+  "dependencies": {
+    "electron": "^28.0.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.13.3",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "build": {
+    "appId": "com.ephesoft.copilot",
+    "productName": "Ephesoft Copilot",
+    "directories": {
+      "output": "dist/desktop",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-server/ephesoft-server",
+        "to": "server",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "extension",
+        "to": "extension",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "config.example.json",
+        "to": "config.example.json"
+      },
+      {
+        "from": "INSTALL.md",
+        "to": "INSTALL.md"
+      }
+    ],
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.productivity",
+      "artifactName": "Ephesoft-Copilot-${version}-mac.${ext}"
+    },
+    "dmg": {
+      "title": "Ephesoft Copilot ${version}",
+      "artifactName": "Ephesoft-Copilot-${version}-mac.dmg"
+    },
+    "win": {
+      "target": ["nsis"],
+      "artifactName": "Ephesoft-Copilot-${version}-win.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Ephesoft Copilot",
+      "artifactName": "Ephesoft-Copilot-${version}-win-setup.${ext}"
+    }
+  }
+}

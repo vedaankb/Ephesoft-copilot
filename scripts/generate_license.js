@@ -95,6 +95,7 @@ function main() {
 
     // Build the license metadata payload
     const payload = {
+        v: 1,
         client,
         expires,
     };

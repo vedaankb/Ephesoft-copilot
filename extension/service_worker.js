@@ -46,7 +46,7 @@ chrome.runtime.onConnect.addListener((port) => {
         if (!msg || !msg.type) return;
         if (msg.type === 'start') {
             if (running) { status('A run is already in progress.', 'warn'); return; }
-            startRun(msg.mode || 'fill');
+            startRun(msg.mode || 'fill', msg.tabId);
         } else if (msg.type === 'stop') {
             abortRequested = true;
             if (runController) { try { runController.abort(); } catch (e) { /* noop */ } }
@@ -121,13 +121,27 @@ async function loadSystemInstruction() {
 
 // ---------- tab helpers ----------
 
-async function getActiveTab() {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab || !tab.id) throw new Error('No active tab. Click into the Ephesoft tab and try again.');
-    if (/^(chrome|edge|about|chrome-extension):/i.test(tab.url || '')) {
-        throw new Error('The active tab is a browser page. Open the Ephesoft web page, then run again.');
+function isAutomatableTab(tab) {
+    if (!tab || !tab.id) return false;
+    return !/^(chrome|edge|about|chrome-extension):/i.test(tab.url || '');
+}
+
+async function getTargetTab(preferredTabId) {
+    if (preferredTabId) {
+        try {
+            const tab = await chrome.tabs.get(preferredTabId);
+            if (isAutomatableTab(tab)) return tab;
+        } catch (e) { /* tab closed or invalid */ }
     }
-    return tab;
+
+    // Side panel is focused — prefer tabs in the same window as the panel.
+    const sameWindow = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (isAutomatableTab(sameWindow[0])) return sameWindow[0];
+
+    const lastFocused = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (isAutomatableTab(lastFocused[0])) return lastFocused[0];
+
+    throw new Error('No Ephesoft tab found. Click into the Ephesoft web page, then run again.');
 }
 
 function friendlyInjectError(message) {
@@ -181,14 +195,14 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ---------- the agent loop ----------
 
-async function startRun(mode) {
+async function startRun(mode, preferredTabId) {
     running = true;
     abortRequested = false;
     runController = new AbortController();
     post({ type: 'state', running: true });
     post({ type: 'run_started', mode });
     try {
-        await runAgent(mode);
+        await runAgent(mode, preferredTabId);
     } catch (e) {
         // A user Stop (or panel close) aborts the in-flight fetch; treat as graceful stop.
         if (abortRequested || (e && e.name === 'AbortError')) {
@@ -265,7 +279,7 @@ async function executeAction(tabId, action) {
     }
 }
 
-async function runAgent(mode) {
+async function runAgent(mode, preferredTabId) {
     // 1. Double-check license offline in service worker
     const { licenseKey } = await chrome.storage.local.get(['licenseKey']);
     if (!licenseKey) {
@@ -277,13 +291,13 @@ async function runAgent(mode) {
     if (!geminiApiKey) throw new Error('No Gemini API key set. Open Settings and paste your key.');
 
     const systemInstruction = await loadSystemInstruction();
-    const tab = await getActiveTab();
+    const tab = await getTargetTab(preferredTabId);
 
     status(`Connecting to page: ${tab.title || tab.url}`);
     await ensureContentScript(tab.id);
 
     const history = [];
-    const maxSteps = mode === 'fill' ? 60 : 20;
+    const maxSteps = mode === 'fill' ? 80 : 30;
     const recent = [];           // ring buffer of recent action keys
     let lastScrollY = null;      // to detect scrolls that no longer move the page
 
@@ -300,9 +314,12 @@ async function runAgent(mode) {
         const o = obsResp.result;
 
         const shot = await captureViewport(tab.windowId);
+        if (!shot && step === 1) {
+            status('Screenshot unavailable (VM/RDP?) — running text-only mode.', 'warn');
+        }
         const userText = buildUserText(mode, o, history);
 
-        status('Thinking (Gemini)...');
+        status(shot ? 'Thinking (Gemini + vision)...' : 'Thinking (Gemini, text-only)...');
         const signal = runController ? runController.signal : undefined;
         const raw = await callGemini({
             apiKey: geminiApiKey,

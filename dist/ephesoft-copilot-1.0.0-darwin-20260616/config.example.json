@@ -1,0 +1,9 @@
+{
+  "GEMINI_API_KEY": "",
+  "GEMINI_MODEL": "gemini-2.5-pro",
+  "EPHESOFT_URL": "",
+  "MOCK": false,
+  "LOG_SCREENSHOTS": true,
+  "LOG_ACTIONS": true,
+  "MAX_RETRIES": 2
+}

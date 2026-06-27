@@ -1,0 +1,11 @@
+{
+  "name": "ephesoft-copilot",
+  "version": "1.0.0",
+  "built_at": "2026-06-15T09:15:17Z",
+  "platform": "darwin",
+  "install_mac_linux": "./install.sh",
+  "install_windows": ".\\install.ps1",
+  "launch_mac_linux": "./launch.sh",
+  "launch_windows": ".\\launch.ps1",
+  "extension_path": "extension/"
+}

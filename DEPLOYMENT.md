@@ -1,154 +1,139 @@
 # Ephesoft Copilot - Enterprise Deployment & IT Administration Guide
 
-This guide provides system administrators and IT departments with instructions to deploy, configure, and manage the **Ephesoft Copilot** extension across enterprise fleets. It covers both **Google Chrome** and **Microsoft Edge** on Windows environments.
+This guide covers deploying and managing **Ephesoft Copilot** across enterprise fleets on **Google Chrome** and **Microsoft Edge** (Windows).
 
 ---
 
 ## 1. Architecture & Security Overview
 
-Ephesoft Copilot (V2) is a **pure Chrome/Edge extension** (Manifest V3). 
-* **No Local Backend**: It does not run local servers, Python environments, or background executable processes.
-* **Network Security**: It communicates directly with the Google Gemini API via standard HTTPS requests (`https://generativelanguage.googleapis.com/*`).
-* **Data Privacy**: No document data, screenshots, or credentials are sent to any third-party servers other than the configured Gemini API endpoint.
-* **Storage**: Settings (API keys) are stored securely using the browser's sandboxed storage (`chrome.storage.local` or `chrome.storage.managed`).
-* **Offline Cryptographic Licensing**: To safeguard Intellectual Property and control client access, the extension utilizes a 100% offline asymmetric cryptographic license verification system. It locks the extension to specific expiration dates without making any external cloud API calls.
+Ephesoft Copilot (V2) is a **pure Chrome/Edge extension** (Manifest V3).
+
+| Property | Detail |
+| :--- | :--- |
+| Local backend | None — no Python, Electron, or background executables |
+| Network | HTTPS to `https://generativelanguage.googleapis.com/*` only |
+| Data | Screenshots and page text sent only to the configured Gemini API |
+| Settings | `chrome.storage.local` or `chrome.storage.managed` (GPO) |
+| Licensing | Offline ECDSA (P-256) signature verification — no licensing server |
 
 ---
 
-## 2. Pilot & Developer Deployment (1-Click Installer)
+## 2. Recommended: Enterprise Force-Install (Production)
 
-For pilot programs, developers, or quick local trials, we provide a **1-click PowerShell bootstrap installer** that does not require local administrator privileges or modifications to system-wide execution policies.
+For production fleets, **do not rely on `--load-extension` shortcuts**. Corporate GPO often blocks developer-mode and external extensions. Use **force-install via GPO** instead.
 
-### The 1-Line Installer Command
-Open a standard Windows PowerShell window (no admin rights needed) and paste the following command:
+### Google Chrome
+1. GPO: `Computer Configuration → Administrative Templates → Google → Google Chrome → Extensions`
+2. Policy: **Configure the list of force-installed apps and extensions**
+3. Value: `<extension_id>;https://clients2.google.com/service/update2/crx`
+
+**Registry alternative:**
+* Path: `HKLM\Software\Policies\Google\Chrome\ExtensionInstallForcelist`
+* Name: `1` | Type: `REG_SZ`
+* Value: `<extension_id>;https://clients2.google.com/service/update2/crx`
+
+### Microsoft Edge
+1. GPO: `Computer Configuration → Administrative Templates → Microsoft Edge → Extensions`
+2. Policy: **Control which extensions are installed silently**
+3. Value: `<extension_id>;https://edge.microsoft.com/extension/update/chrome/v5`
+
+**Registry alternative:**
+* Path: `HKLM\Software\Policies\Microsoft\Edge\ExtensionInstallForcelist`
+* Name: `1` | Type: `REG_SZ`
+* Value: `<extension_id>;https://edge.microsoft.com/extension/update/chrome/v5`
+
+See **Section 6** for self-hosted CRX/update.xml when public stores are blocked.
+
+---
+
+## 3. Pilot Deployment (1-Click Installer)
+
+For pilots and QA (non-GPO machines), use the PowerShell bootstrap installer:
 
 ```powershell
 irm -useb https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1 | iex
 ```
 
-### What the Installer Does:
-1. **Downloads**: Downloads the latest packaged extension zip directly from GitHub.
-2. **Installs**: Extracts the extension files to the user's sandboxed local directory: `%LOCALAPPDATA%\EphesoftCopilot`.
-3. **Shortcuts**: Auto-detects Google Chrome and Microsoft Edge installations and generates custom Desktop Shortcuts:
-   * `Ephesoft Copilot (Chrome)`
-   * `Ephesoft Copilot (Edge)`
-4. **Launches**: The shortcuts launch Chrome or Edge with the `--load-extension` flag pre-configured, loading the extension instantly into the browser session.
+### What it does
+1. Downloads the latest repo from GitHub.
+2. Builds an **obfuscated extension zip** when Node.js is available.
+3. Installs to `%LOCALAPPDATA%\EphesoftCopilot`.
+4. Creates desktop shortcuts that launch Chrome/Edge with:
+   * `--load-extension` pointing at the install folder
+   * `--user-data-dir` pointing at `%LOCALAPPDATA%\EphesoftCopilot\profile` (dedicated profile)
 
----
+### Why a dedicated profile?
+Chrome/Edge **ignore `--load-extension`** when an existing browser process is already running on the default profile. A dedicated profile guarantees the extension loads every time via the shortcut.
 
-## 3. Enterprise Fleet Deployment (Group Policy / GPO)
+### Pilot user instructions
+* **Always** launch via the desktop shortcut (`Ephesoft Copilot (Chrome)` or `(Edge)`).
+* Log into Ephesoft once inside that profile — login persists there.
+* Do not expect the extension in the user's normal browser profile.
 
-For large-scale production rollouts, IT departments can force-install the extension and lock down configurations using Active Directory Group Policy Objects (GPO) or Registry keys.
-
-### Step 3.1: Force-Install the Extension
-You can force-install the extension from the Chrome Web Store or Edge Add-ons Store so that it is automatically added to all users' browsers, cannot be disabled or uninstalled by the user, and receives automatic updates.
-
-#### For Google Chrome:
-1. Open your Group Policy Management Editor and navigate to:
-   `Computer Configuration \ Administrative Templates \ Google \ Google Chrome \ Extensions`
-2. Open the **Configure the list of force-installed apps and extensions** policy.
-3. Enable the policy and click **Show...**.
-4. Add the following value (replace `<extension_id>` with your published extension ID):
-   ```text
-   <extension_id>;https://clients2.google.com/service/update2/crx
-   ```
-
-*Alternatively, via Registry:*
-* **Path**: `HKLM\Software\Policies\Google\Chrome\ExtensionInstallForcelist`
-* **Name**: `1` (or next sequential index)
-* **Type**: `REG_SZ`
-* **Value**: `<extension_id>;https://clients2.google.com/service/update2/crx`
-
-#### For Microsoft Edge:
-1. Open your Group Policy Management Editor and navigate to:
-   `Computer Configuration \ Administrative Templates \ Microsoft Edge \ Extensions`
-2. Open the **Control which extensions are installed silently** policy.
-3. Enable the policy and click **Show...**.
-4. Add the following value (replace `<extension_id>` with your published extension ID):
-   ```text
-   <extension_id>;https://edge.microsoft.com/extension/update/chrome/v5
-   ```
-
-*Alternatively, via Registry:*
-* **Path**: `HKLM\Software\Policies\Microsoft\Edge\ExtensionInstallForcelist`
-* **Name**: `1` (or next sequential index)
-* **Type**: `REG_SZ`
-* **Value**: `<extension_id>;https://edge.microsoft.com/extension/update/chrome/v5`
+### Offline alternative
+Unzip a release package and run `extension/copilot-launcher.bat` from inside the extension folder.
 
 ---
 
 ## 4. Pre-Configuring Settings (Managed Storage Policy)
 
-To make the extension **zero-configuration** for end-users, IT administrators can pre-configure the Gemini API key and model. When these policies are pushed, the extension's Settings panel will display **"Managed by IT policy"** and lock the input fields to prevent tampering.
+Push the Gemini API key and model so end-users see **"Managed by IT policy"** and cannot edit settings.
 
-### Step 4.1: Registry Configuration
+### Google Chrome
+* Key: `HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\<extension_id>\policy`
+* Values:
+  * `geminiApiKey` (`REG_SZ`) — corporate Gemini key
+  * `geminiModel` (`REG_SZ`) — e.g. `gemini-2.5-pro`
 
-Create the following registry keys and values to configure the extension settings.
+### Microsoft Edge
+* Key: `HKLM\Software\Policies\Microsoft\Edge\3rdparty\extensions\<extension_id>\policy`
+* Same values as Chrome.
 
-#### For Google Chrome:
-* **Key Path**: `HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\<extension_id>\policy`
-* **Values**:
-  * `geminiApiKey` (Type: `REG_SZ`): Your corporate Gemini API key (starts with `AIza`).
-  * `geminiModel` (Type: `REG_SZ`): The model to use (e.g., `gemini-2.5-pro` or `gemini-2.5-flash`).
+Schema reference: `extension/managed_schema.json`
 
-#### For Microsoft Edge:
-* **Key Path**: `HKLM\Software\Policies\Microsoft\Edge\3rdparty\extensions\<extension_id>\policy`
-* **Values**:
-  * `geminiApiKey` (Type: `REG_SZ`): Your corporate Gemini API key (starts with `AIza`).
-  * `geminiModel` (Type: `REG_SZ`): The model to use (e.g., `gemini-2.5-pro` or `gemini-2.5-flash`).
-
-### Step 4.2: ADMX Group Policy Templates (Alternative)
-
-If using ADMX templates, you can configure these settings under the **Extension 3rd Party Policies** section by providing the policy schema defined in `extension/managed_schema.json`:
-
-```json
-{
-  "geminiApiKey": "AIzaSyYourCorporateKeyHere...",
-  "geminiModel": "gemini-2.5-pro"
-}
-```
+After deploying policies, run `gpupdate /force` and verify at `chrome://policy` or `edge://policy`.
 
 ---
 
-## 5. Offline Cryptographic Licensing (IP Protection)
+## 5. Offline Cryptographic Licensing
 
-To safeguard your Intellectual Property and prevent clients from distributing or using the extension without authorization, the extension enforces a **100% Offline Cryptographic Licensing** mechanism.
+### How it works
+1. Extension embeds an ECDSA P-256 **public key**.
+2. You generate signed license keys locally with `scripts/generate_license.js`.
+3. Extension verifies signature + expiration **100% offline** via Web Crypto.
+4. No license server, no phone-home.
 
-### How it Works:
-1. **Asymmetric Cryptography**: The extension embeds an asymmetric **ECDSA (P-256)** public key. Only you (the creator) possess the secret private key.
-2. **Signed License Keys**: When onboarding a client, you generate a cryptographically signed license key containing their name and expiration date.
-3. **Offline Verification**: The extension verifies the license key's signature using the embedded public key natively via the browser's Web Crypto API. This is 100% offline and requires no cloud database or licensing server.
-4. **Access Enforcement**: The service worker and sidepanel enforce:
-   * **Expiration Lock**: The extension will block execution if the current system date is past the `expires` date.
-5. **Backdoor Master Key**: For developer testing or emergency bypasses, entering the literal string `1` as the license key acts as an override, granting unlimited access with a mock developer profile.
-
-### How to Generate a License Key for a Client:
-Run the license generator script on your development machine:
-
+### Generate a client license
 ```bash
 node scripts/generate_license.js --client "Client Name" --expires "YYYY-MM-DD"
 ```
 
-**Example**:
+Example:
 ```bash
-node scripts/generate_license.js --client "Wombat BPO" --expires "2027-06-30"
+node scripts/generate_license.js --client "Quadrantech Pilot" --expires "2027-12-31"
 ```
 
-Copy the generated Base64 block and send it to your client. They must paste it into the **License Key** field in the Settings panel of the Copilot to activate the extension.
+Send the Base64 output to the client. They paste it into **Settings → License Key → Save**.
+
+### Developer bypass (internal testing only)
+A non-guessable internal bypass key exists for developer QA. **Do not publish it in public docs.** Share only with trusted testers via direct message.
+
+### Key management
+* Private key lives in `keys/private.pem` (gitignored). **Back it up offline** — losing it invalidates all issued licenses.
+* To rotate keys: generate a new keypair, update `PUBLIC_KEY_B64` in `extension/lib/license.js`, rebuild, and re-issue all client licenses.
+
+### Build protection
+Production builds obfuscate JavaScript via `node scripts/package_extension.js`. The 1-click installer runs this automatically when Node.js is present.
 
 ---
 
-## 6. Private Self-Hosting (Alternative to Web Stores)
+## 6. Private Self-Hosting (No Public Web Store)
 
-If your corporate policy prohibits publishing to public web stores (even as unlisted), you can host the extension on an internal IIS, Apache, or Nginx web server.
+When public store publishing is blocked:
 
-### Step 6.1: Package the Extension
-1. Package the extension into a `.crx` file using Chrome's built-in packager:
-   `chrome://extensions > Pack extension > select the "extension" folder`.
-2. This generates a `.crx` file and a `.pem` private key file. Keep the `.pem` file secure to sign future updates.
-
-### Step 6.2: Create the Update Manifest (`update.xml`)
-Host an XML file on your internal server alongside the `.crx` file:
+1. **Package:** `node scripts/package_extension.js` → obfuscated zip
+2. **CRX:** `chrome://extensions` → Pack extension → keep `.pem` key secure
+3. **update.xml** on internal server:
 
 ```xml
 <?xml version='1.0' encoding='UTF-8'?>
@@ -159,18 +144,43 @@ Host an XML file on your internal server alongside the `.crx` file:
 </gupdate>
 ```
 
-### Step 6.3: Deploy via GPO
-When force-installing the extension (Section 3), point the GPO/Registry to your internal update manifest instead of the public store:
-
-```text
-<your_extension_id>;https://your-internal-server.corp/copilot/update.xml
-```
+4. **GPO force-install** pointing to your update manifest:
+   `<extension_id>;https://your-internal-server.corp/copilot/update.xml`
 
 ---
 
-## 7. Troubleshooting & Support
+## 7. Network Allowlist
 
-* **Extension not loading**: Verify that Developer Mode is allowed by GPO on pilot machines, or use the GPO Force-Install method.
-* **Network / Proxy Blocks**: Ensure that your corporate proxy allows outbound HTTPS requests to:
-  `https://generativelanguage.googleapis.com`
-* **Managed Settings not appearing**: Run `gpupdate /force` in a command prompt to force-apply Group Policies, then check `chrome://policy` or `edge://policy` to verify that the policies are active.
+Ensure outbound HTTPS is permitted to:
+* `https://generativelanguage.googleapis.com` (Gemini API)
+
+Corporate TLS inspection may require adding Google's roots or an explicit allowlist entry (see your IT SSL troubleshooting notes from V1 pilot).
+
+---
+
+## 8. Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| :--- | :--- | :--- |
+| Extension not loading | Normal browser already open | Use desktop shortcut (dedicated profile) or GPO force-install |
+| "Disable developer mode extensions" banner | `--load-extension` on default profile | Switch to GPO force-install for production |
+| License invalid | Wrong key, expired, or key rotation | Re-issue license; verify full Base64 pasted |
+| Managed settings missing | GPO not applied | `gpupdate /force`, check `chrome://policy` |
+| Fill less accurate in VM | Screenshot capture blocked | Normal — extension falls back to text-only; verify scroll/fill still completes |
+| Gemini 403/SSL | Proxy or key permissions | Allowlist API domain; verify API key and model access |
+
+---
+
+## 9. Building a Release Package
+
+From the repo root (requires Node.js):
+
+```bash
+npm install
+node scripts/generate_icons.js   # once, if icons missing
+node scripts/package_extension.js
+```
+
+Output: `dist/ephesoft-copilot-extension-v2.0.0.zip` (obfuscated, ready to distribute).
+
+Attach this zip to GitHub Releases for the installer to prefer over live repo builds.

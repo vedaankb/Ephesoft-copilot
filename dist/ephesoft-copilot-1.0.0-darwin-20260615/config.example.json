@@ -1,0 +1,9 @@
+{
+  "GEMINI_API_KEY": "",
+  "GEMINI_MODEL": "gemini-1.5-flash",
+  "EPHESOFT_URL": "",
+  "MOCK": false,
+  "LOG_SCREENSHOTS": true,
+  "LOG_ACTIONS": true,
+  "MAX_RETRIES": 2
+}

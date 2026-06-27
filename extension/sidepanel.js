@@ -189,7 +189,12 @@ async function start(mode) {
         return;
     }
     clearResult();
-    send({ type: 'start', mode });
+    let tabId;
+    try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = tabs[0]?.id;
+    } catch (e) { /* fallback handled in service worker */ }
+    send({ type: 'start', mode, tabId });
 }
 
 // ---------- settings ----------
