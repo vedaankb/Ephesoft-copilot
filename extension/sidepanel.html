@@ -37,7 +37,10 @@
         <section class="feed-wrap">
             <div class="feed-head">
                 <span>Activity</span>
-                <button id="clearFeed" class="link">clear</button>
+                <div class="feed-controls">
+                    <button id="resetSession" class="link link-warning" title="Clear cached screenshots/session and reconnect to the current tab">reset session</button>
+                    <button id="clearFeed" class="link">clear</button>
+                </div>
             </div>
             <div class="feed-container">
                 <ul id="feed" class="feed"></ul>

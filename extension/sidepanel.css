@@ -486,6 +486,20 @@ main::-webkit-scrollbar-thumb:hover {
     color: #60a5fa;
 }
 
+.feed-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.link-warning {
+    color: var(--amber, #f59e0b);
+}
+
+.link-warning:hover {
+    color: #fbbf24;
+}
+
 /* --- Settings --- */
 .settings {
     padding: 0;

@@ -13,6 +13,7 @@ const els = {
     resultBadge: document.getElementById('resultBadge'),
     resultTitle: document.getElementById('resultTitle'),
     resultDetail: document.getElementById('resultDetail'),
+    resetSession: document.getElementById('resetSession'),
     licenseKey: document.getElementById('licenseKey'),
     toggleLicense: document.getElementById('toggleLicense'),
     licenseStatus: document.getElementById('licenseStatus'),
@@ -78,6 +79,9 @@ function onMessage(msg) {
             break;
         case 'done':
             showResult(msg);
+            break;
+        case 'reset_done':
+            addFeed(msg.message || 'Session reset. Ready for a fresh run.', 'success');
             break;
     }
 }
@@ -154,6 +158,30 @@ els.fill.addEventListener('click', () => start('fill'));
 els.next.addEventListener('click', () => start('next'));
 els.stop.addEventListener('click', () => send({ type: 'stop' }));
 els.clearFeed.addEventListener('click', () => { els.feed.innerHTML = ''; });
+els.resetSession.addEventListener('click', () => resetSession());
+
+async function resetSession() {
+    // Clear the UI so stale results don't linger.
+    clearResult();
+    els.feed.innerHTML = '';
+    addFeed('Resetting session (clearing cached screenshots + reconnecting to the current tab)...', 'warn');
+
+    // Reconnect the port fresh in case the worker was suspended and state is stale.
+    try { if (port) port.disconnect(); } catch (e) { /* noop */ }
+    port = null;
+    ensurePort();
+
+    // Find the tab the user is actually looking at right now so the worker re-targets it.
+    let tabId;
+    try {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = tabs[0]?.id;
+    } catch (e) { /* worker will fall back */ }
+
+    send({ type: 'reset_session', tabId });
+    // Refresh settings/license status display.
+    loadSettings();
+}
 
 async function start(mode) {
     // 1. Verify License offline

@@ -53,6 +53,8 @@ chrome.runtime.onConnect.addListener((port) => {
             status('Stop requested - cancelling current step...', 'warn');
         } else if (msg.type === 'test_key') {
             handleTestKey();
+        } else if (msg.type === 'reset_session') {
+            handleResetSession(msg.tabId);
         } else if (msg.type === 'get_state') {
             port.postMessage({ type: 'state', running });
         }
@@ -67,6 +69,45 @@ chrome.runtime.onConnect.addListener((port) => {
         }
     });
 });
+
+// Purge all cached/session state so the next run starts clean: abort any in-flight
+// work, drop the cached prompts, reset run flags, and re-inject a fresh content
+// script into the tab the user is currently viewing (clears stale DOM listeners and
+// the __ephesoftCopilotInjected guard by reloading the script into the live page).
+async function handleResetSession(preferredTabId) {
+    // 1. Abort anything in flight and clear run state.
+    abortRequested = true;
+    if (runController) { try { runController.abort(); } catch (e) { /* noop */ } }
+    running = false;
+    runController = null;
+
+    // 2. Force prompts (SOP/RAG) to reload from disk on the next run.
+    _systemInstruction = null;
+
+    // 3. Reset the UI running indicator.
+    post({ type: 'state', running: false });
+
+    // 4. Reconnect to the current tab and refresh the content script connection.
+    let reconnected = false;
+    try {
+        const tab = await getTargetTab(preferredTabId);
+        await injectContentScript(tab.id);
+        reconnected = true;
+        status(`Reconnected to: ${tab.title || tab.url}`, 'info');
+    } catch (e) {
+        status(`Reset: could not reconnect to a page (${e.message}). Open the Ephesoft tab and try again.`, 'warn');
+    }
+
+    // 5. Clear the abort flag so the next run is not immediately cancelled.
+    abortRequested = false;
+
+    post({
+        type: 'reset_done',
+        message: reconnected
+            ? 'Session reset - cached screenshots cleared and reconnected to the current tab.'
+            : 'Session reset - state cleared. Click into the Ephesoft tab, then run again.',
+    });
+}
 
 async function handleTestKey() {
     try {

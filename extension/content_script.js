@@ -103,11 +103,85 @@
 
     function query(selector) {
         if (!selector) throw new Error('No selector provided');
-        let el;
+        let el = null;
+        let cssError = null;
         try { el = document.querySelector(selector); }
-        catch (e) { throw new Error(`Invalid selector '${selector}': ${e.message}`); }
-        if (!el) throw new Error(`Element not found: ${selector}`);
-        return el;
+        catch (e) { cssError = e.message; }
+        if (el) return el;
+
+        // The exact CSS selector failed (invalid, or the element ID/class changed).
+        // Try to recover by treating the selector as a hint and matching against
+        // common attributes and visible labels before giving up.
+        const recovered = recoverElement(selector);
+        if (recovered) return recovered;
+
+        if (cssError) {
+            throw new Error(`Invalid selector '${selector}': ${cssError}. ${nearbyHint(selector)}`);
+        }
+        throw new Error(`Element not found: ${selector}. ${nearbyHint(selector)}`);
+    }
+
+    // Pull a human-readable hint token out of a selector so we can fuzzy-match it
+    // against placeholders / aria-labels / names / ids / visible text.
+    function selectorHint(selector) {
+        const attr = selector.match(/\[[^\]]*?["']([^"']+)["']\]/); // [name="foo"] -> foo
+        if (attr && attr[1]) return attr[1].toLowerCase();
+        const idc = selector.match(/[#.]([A-Za-z0-9_-]{2,})/); // #foo / .foo -> foo
+        if (idc && idc[1]) return idc[1].toLowerCase();
+        const bare = selector.replace(/[^A-Za-z0-9 _-]/g, ' ').trim();
+        return bare.toLowerCase();
+    }
+
+    // Best-effort element recovery when a CSS selector no longer resolves.
+    function recoverElement(selector) {
+        const hint = selectorHint(selector);
+        if (!hint || hint.length < 2) return null;
+        const attrSel = [
+            `[placeholder*="${hint}" i]`,
+            `[aria-label*="${hint}" i]`,
+            `[name*="${hint}" i]`,
+            `[id*="${hint}" i]`,
+            `[title*="${hint}" i]`,
+        ].join(',');
+        let el = null;
+        try { el = document.querySelector(attrSel); } catch (e) { /* ignore */ }
+        if (el) return el;
+
+        // Fall back to a <label> whose text contains the hint -> its bound control.
+        try {
+            const labels = Array.from(document.querySelectorAll('label'));
+            for (const lab of labels) {
+                if ((lab.innerText || '').toLowerCase().includes(hint)) {
+                    if (lab.htmlFor) {
+                        const bound = document.getElementById(lab.htmlFor);
+                        if (bound) return bound;
+                    }
+                    const inner = lab.querySelector('input, textarea, select, [contenteditable="true"]');
+                    if (inner) return inner;
+                }
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    // Produce a short list of visible candidate fields to help the model retry.
+    function nearbyHint(selector) {
+        try {
+            const hint = selectorHint(selector);
+            const fields = Array.from(document.querySelectorAll('input, textarea, select'))
+                .filter(f => f.offsetParent !== null)
+                .slice(0, 8)
+                .map(f => {
+                    const id = f.id ? `#${f.id}` : '';
+                    const nm = f.name ? `[name="${f.name}"]` : '';
+                    const ph = f.placeholder ? ` ph="${f.placeholder}"` : '';
+                    return (id || nm || f.tagName.toLowerCase()) + ph;
+                });
+            if (!fields.length) return 'No visible input fields detected - the target may be in an iframe or not yet loaded.';
+            return `Nearby fields you can target instead: ${fields.join(', ')}.`;
+        } catch (e) {
+            return '';
+        }
     }
 
     // --- DOM operations ---
