@@ -48,11 +48,17 @@ See **Section 6** for self-hosted CRX/update.xml when public stores are blocked.
 
 ## 3. Pilot Deployment (1-Click Installer)
 
-For pilots and QA (non-GPO machines), use the PowerShell bootstrap installer:
+For pilots and QA (non-GPO machines), use the PowerShell bootstrap installer.
+
+**Recommended** (download then run — works on locked-down corporate PowerShell):
 
 ```powershell
-irm -useb https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1 | iex
+$url = 'https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1'
+$file = "$env:TEMP\ephesoft-install.ps1"
+Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing; & $file
 ```
+
+> Avoid `irm ... | iex` on corporate machines — it can fail with *"cannot bind argument to parameter Path because it is null"*.
 
 ### What it does
 1. Downloads the latest repo from GitHub.

@@ -37,10 +37,14 @@ Active Ephesoft tab (agent's real logged-in session)
 - Valid **license key** (see below)
 - Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
 
-### Option A — Windows 1-click installer (pilots)
+### Option A — Windows installer (pilots)
+
 ```powershell
-irm -useb https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1 | iex
+$url = 'https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1'
+$file = "$env:TEMP\ephesoft-install.ps1"
+Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing; & $file
 ```
+
 Creates desktop shortcuts that launch a **dedicated browser profile** with the extension preloaded. **Always use the shortcut** — the extension will not appear in your normal browser profile.
 
 ### Option B — Load unpacked (developers)
