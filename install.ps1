@@ -14,9 +14,14 @@ Write-Host "          EPHESOFT COPILOT INSTALLER              " -ForegroundColor
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host "Installing Ephesoft Copilot (V2 Pure Extension)..." -ForegroundColor Yellow
 
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$HelpersPath = Join-Path $ScriptDir "scripts\install_helpers.ps1"
-if (Test-Path $HelpersPath) {
+# Dot-source shared helpers when run from a local clone; inline them for irm | iex
+# ($MyInvocation.MyCommand.Path is null when piped from the web).
+$HelpersPath = $null
+if ($MyInvocation.MyCommand.Path) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $HelpersPath = Join-Path $ScriptDir 'scripts\install_helpers.ps1'
+}
+if ($HelpersPath -and (Test-Path -LiteralPath $HelpersPath)) {
     . $HelpersPath
 } else {
     # When invoked via irm | iex the script has no local helpers — inline essentials.
