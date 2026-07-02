@@ -219,6 +219,7 @@ if ($CreatedShortcuts -gt 0) {
     Write-Host 'Double-click a desktop shortcut to start.' -ForegroundColor White
 } else {
     Write-Host ''
-    Write-Host "No browser found — load manually: chrome://extensions > Load unpacked > $InstallDir" -ForegroundColor Yellow
+    Write-Host "No browser found — load manually:" -ForegroundColor Yellow
+    Write-Host "  chrome://extensions -> Load unpacked -> $InstallDir" -ForegroundColor White
 }
 Write-Host '==================================================' -ForegroundColor Green
