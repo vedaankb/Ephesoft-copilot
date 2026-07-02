@@ -470,6 +470,13 @@ main::-webkit-scrollbar-thumb:hover {
     background: rgba(239, 68, 68, 0.04);
 }
 
+.feed li.think {
+    border-left-color: #a78bfa;
+    background: rgba(167, 139, 250, 0.06);
+    font-style: italic;
+    color: #ddd6fe;
+}
+
 .link {
     background: none;
     border: none;

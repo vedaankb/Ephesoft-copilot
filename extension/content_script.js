@@ -360,17 +360,26 @@
 
     // --- observation: cleaned HTML + visible text + scroll state ---
 
+    // Send as much of the DOM as we reasonably can - gemini-2.5-pro has a huge
+    // context window, so the limiting factor is signal, not size. We strip only
+    // truly useless nodes (scripts/styles/svg/comments/data-URIs) and keep the
+    // rest so every field selector on the page is visible to the model.
+    const HTML_MAX = 500000;
+
     function cleanHtml(maxLen) {
         const clone = document.documentElement.cloneNode(true);
         clone.querySelectorAll('script, style, noscript, svg, link, meta, head').forEach(n => n.remove());
         let html = clone.outerHTML || '';
+        html = html.replace(/<!--[\s\S]*?-->/g, '');            // drop HTML comments
+        html = html.replace(/(src|href)="data:[^"]*"/gi, '$1="data:..."'); // shrink inline data URIs
         html = html.replace(/\s+/g, ' ').trim();
-        return html.slice(0, maxLen || 10000);
+        const cap = maxLen || HTML_MAX;
+        return html.slice(0, cap);
     }
 
     function visibleText(maxLen) {
         const t = (document.body && document.body.innerText) || '';
-        return t.replace(/\n{3,}/g, '\n\n').slice(0, maxLen || 8000);
+        return t.replace(/\n{3,}/g, '\n\n').slice(0, maxLen || 40000);
     }
 
     function observe() {
@@ -380,8 +389,8 @@
         return {
             url: location.href,
             title: document.title,
-            html: cleanHtml(10000),
-            text: visibleText(8000),
+            html: cleanHtml(HTML_MAX),
+            text: visibleText(40000),
             scroll: {
                 y,
                 maxY,

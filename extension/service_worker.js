@@ -245,8 +245,8 @@ function startThinkingHeartbeat(hasVision) {
     const timer = setInterval(() => {
         const secs = Math.round((Date.now() - startedAt) / 1000);
         let suffix = '';
-        if (secs >= 60) suffix = ' - still working, will retry shortly if it stalls';
-        else if (secs >= 30) suffix = ' - taking longer than usual';
+        if (secs >= 90) suffix = ' - still working, will retry shortly if it stalls';
+        else if (secs >= 45) suffix = ' - taking longer than usual (gemini-2.5-pro is thorough)';
         status(`${base}... ${secs}s${suffix}`);
     }, 10000);
     return () => clearInterval(timer);
@@ -439,7 +439,10 @@ async function runAgent(mode, preferredTabId) {
             throw new Error('Model response had no "action" field.');
         }
 
-        if (action.note) status(action.note);
+        // Stream the model's live reasoning to the Activity feed so the human can
+        // follow what it is thinking on every step.
+        if (action.reason) status(action.reason, 'think');
+        if (action.note && action.note !== action.reason) status(action.note);
 
         if (action.action === 'complete') {
             post({
