@@ -51,10 +51,37 @@ outside JSON). Allowed actions:
 
 1. First understand the document: read the screenshot + page text. Scroll the document viewer
    if the document has multiple pages or content below the fold.
-2. Set the document type (select), then fill each field (fill), then build the line-item table
-   (clear it, click add-row, fill the new row's cells).
-3. After filling, scroll the fields panel to confirm nothing is still red/empty.
-4. Call `complete` with the final doc_type, any still-red fields, and any flags.
+2. Set the document type (select), then fill each top-level field (fill): dates, numbers,
+   provider, pet name, totals, etc.
+3. Then populate the LINE ITEMS table (see the mandatory process below).
+4. After filling, scroll the fields panel to confirm nothing is still red/empty.
+5. Call `complete` with the final doc_type, any still-red fields, and any flags.
+
+### Line items - MANDATORY multi-step process (do NOT skip)
+
+The line-item table is a REQUIRED part of every fill. Work ONE row at a time - never try to
+plan the whole table in a single step. Follow this loop exactly:
+
+1. SCROLL to bring the line-item table (and its Add Row / Clear buttons) into view.
+2. If the table already has stale/pre-filled rows that don't match the document, click the
+   table's "Clear"/"Clear All" control first (this is a SAFE click, not a banned action).
+3. For EACH line item on the document, repeat:
+   a. `click` the "Add Row" (or "+") control to create ONE new empty row.
+   b. On the NEXT step, after observing the new row, `fill` that row's cells one at a time:
+      description/service text, then amount/charge (strip `$` and thousands commas), then
+      quantity if the table has a quantity column.
+   c. Observe again and confirm the row's values look right before adding the next row.
+4. When every document line item has a matching filled row, scroll the table to verify.
+5. Only AFTER the line items are populated may you proceed to verify totals and `complete`.
+
+Hard rule: If the document shows line items but the table is still empty, you MUST NOT call
+`complete`. Keep going (add-row -> fill row -> repeat). If you genuinely cannot find the
+Add Row control after scrolling the table area, say so in `note` and continue trying a
+different scroll target before considering `incomplete`.
+
+Prefer the `fill_row` action when the table row exposes multiple cells at once: target the
+row with `selector` and pass ordered `values` for its cells. Otherwise fill each cell with
+individual `fill` actions using the cell's own selector.
 
 ## Working method for NEXT (open the correct batch)
 
@@ -63,9 +90,16 @@ outside JSON). Allowed actions:
 2. Choose the OLDEST batch that is NOT in progress and NOT assigned to anyone.
 3. If that batch is not on the current page, click the batch-list pagination "next page"
    control and look again.
-4. Click the chosen batch's row/open link to open it. Once it has opened (URL or page content
-   changed to the batch detail/validation view), call `complete` with note describing which
-   batch you opened.
+4. Click the chosen batch to open it. IMPORTANT: target the actual clickable element, not a
+   plain text node. Prefer, in order: an `<a>` link in the row, a `<button>`, an element with
+   `role="button"`, or the row (`<tr>`) itself. Do NOT target a bare `<span>`/`<div>` that only
+   holds the batch-number text - clicking that often does nothing. Use the row's link/anchor
+   selector (e.g. `a` inside the batch row) whenever one exists.
+5. After clicking, the page needs a moment to load. On the next step, check whether the URL or
+   page content changed to the batch detail/validation view. If it did NOT change, the click hit
+   the wrong element - pick a different, more specific clickable selector (the row's `<a>` or
+   `<tr>`) and try again. Once the batch has opened, call `complete` with a note describing
+   which batch you opened.
 
 ## CRITICAL SAFETY RULES - NON-NEGOTIABLE
 

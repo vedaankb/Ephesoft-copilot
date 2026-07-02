@@ -193,6 +193,49 @@ async function captureViewport(windowId) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ---------- Gemini call with live "thinking" feedback + timeout retry ----------
+
+// Posts an elapsed-time heartbeat to the panel while a Gemini call is in flight,
+// escalating the message so the user always knows the agent is alive (not frozen).
+function startThinkingHeartbeat(hasVision) {
+    const startedAt = Date.now();
+    const base = hasVision ? 'Thinking (Gemini + vision)' : 'Thinking (Gemini, text-only)';
+    status(`${base}...`);
+    const timer = setInterval(() => {
+        const secs = Math.round((Date.now() - startedAt) / 1000);
+        let suffix = '';
+        if (secs >= 60) suffix = ' - still working, will retry shortly if it stalls';
+        else if (secs >= 30) suffix = ' - taking longer than usual';
+        status(`${base}... ${secs}s${suffix}`);
+    }, 10000);
+    return () => clearInterval(timer);
+}
+
+// Calls Gemini with a heartbeat. On timeout, retries ONCE with a lighter payload
+// (no screenshot, trimmed HTML) so a slow/complex step can still make progress.
+async function think({ apiKey, model, systemInstruction, userText, imageB64, signal, liteUserText }) {
+    const stop = startThinkingHeartbeat(!!imageB64);
+    try {
+        return await callGemini({ apiKey, model, systemInstruction, userText, imageB64, signal });
+    } catch (e) {
+        if (abortRequested || (e && e.name === 'AbortError')) throw e;
+        const isTimeout = /timed out/i.test(e && e.message || '');
+        if (!isTimeout) throw e;
+        status('Step is slow - retrying once with a lighter request...', 'warn');
+        // Retry: drop the image and use a trimmed prompt to reduce inference time.
+        return await callGemini({
+            apiKey,
+            model,
+            systemInstruction,
+            userText: liteUserText || userText,
+            imageB64: undefined,
+            signal,
+        });
+    } finally {
+        stop();
+    }
+}
+
 // ---------- the agent loop ----------
 
 async function startRun(mode, preferredTabId) {
@@ -318,16 +361,18 @@ async function runAgent(mode, preferredTabId) {
             status('Screenshot unavailable (VM/RDP?) — running text-only mode.', 'warn');
         }
         const userText = buildUserText(mode, o, history);
+        // Lighter prompt used for the timeout retry: drop the bulky HTML slice.
+        const liteUserText = buildUserText(mode, { ...o, html: '(omitted for speed - rely on visible text and prior actions)' }, history);
 
-        status(shot ? 'Thinking (Gemini + vision)...' : 'Thinking (Gemini, text-only)...');
         const signal = runController ? runController.signal : undefined;
-        const raw = await callGemini({
+        const raw = await think({
             apiKey: geminiApiKey,
             model: geminiModel,
             systemInstruction,
             userText,
             imageB64: shot || undefined,
             signal,
+            liteUserText,
         });
 
         let action;
@@ -337,13 +382,14 @@ async function runAgent(mode, preferredTabId) {
             if (abortRequested) continue;
             // One corrective retry before giving up - models occasionally wrap JSON in prose.
             status('Model output was not clean JSON - retrying once...', 'warn');
-            const raw2 = await callGemini({
+            const raw2 = await think({
                 apiKey: geminiApiKey,
                 model: geminiModel,
                 systemInstruction,
                 userText: userText + '\n\nYour previous reply was not valid JSON. Respond with ONLY a single JSON object, no prose, no code fences.',
                 imageB64: shot || undefined,
                 signal,
+                liteUserText,
             });
             try { action = parseJsonResponse(raw2); }
             catch (e2) { throw new Error(`Model returned unparseable output: ${e2.message}`); }
@@ -409,8 +455,8 @@ async function runAgent(mode, preferredTabId) {
         history.push(line);
         status(line, res && res.ok ? 'info' : 'warn');
 
-        // Let the page settle (longer after clicks that may navigate).
-        await sleep(action.action === 'click' ? 1000 : 500);
+        // Let the page settle (longer after clicks that may navigate an SPA).
+        await sleep(action.action === 'click' ? 1400 : 500);
     }
 
     throw new Error('Reached the step limit without completing. Check the page state and retry.');

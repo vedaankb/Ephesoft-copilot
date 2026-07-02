@@ -164,31 +164,56 @@
         return { selected: selector, value: matched };
     }
 
+    // Resolve the element that actually carries the click behaviour. Models often
+    // target a <span>/<div> holding the visible text (e.g. a batch number) when the
+    // real handler lives on an enclosing <a>, <button>, row, or [onclick] element.
+    function resolveClickTarget(el) {
+        const actionable = el.closest && el.closest(
+            'a[href], button, [role="button"], [role="link"], input[type="button"], '
+            + 'input[type="submit"], [onclick], td[onclick], tr[onclick], li[onclick]'
+        );
+        if (actionable && !bannedReason(actionable)) return actionable;
+        return el;
+    }
+
+    function dispatchRealClick(target) {
+        target.scrollIntoView && target.scrollIntoView({ block: 'center', inline: 'center' });
+        const opts = { bubbles: true, cancelable: true, view: window };
+        try { target.focus && target.focus({ preventScroll: true }); } catch (e) { /* noop */ }
+        try { target.dispatchEvent(new PointerEvent('pointerover', opts)); } catch (e) { /* older */ }
+        target.dispatchEvent(new MouseEvent('mouseover', opts));
+        try { target.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) { /* older */ }
+        target.dispatchEvent(new MouseEvent('mousedown', opts));
+        try { target.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) { /* older */ }
+        target.dispatchEvent(new MouseEvent('mouseup', opts));
+        target.dispatchEvent(new MouseEvent('click', opts));
+        // Native activation (fires onclick handlers/anchors the same way a real click does).
+        try { if (typeof target.click === 'function') target.click(); } catch (e) { /* noop */ }
+    }
+
     function domClick(selector) {
         const el = query(selector);
-        const banned = bannedReason(el);
+        const target = resolveClickTarget(el);
+        const banned = bannedReason(target) || bannedReason(el);
         if (banned) {
             throw new Error(`SAFETY: refusing to click '${selector}' - matches banned action "${banned}". The human performs that action.`);
         }
-        el.scrollIntoView && el.scrollIntoView({ block: 'center', inline: 'center' });
-        const opts = { bubbles: true, cancelable: true, view: window };
-        try { el.dispatchEvent(new PointerEvent('pointerdown', opts)); } catch (e) { /* older */ }
-        el.dispatchEvent(new MouseEvent('mousedown', opts));
-        try { el.dispatchEvent(new PointerEvent('pointerup', opts)); } catch (e) { /* older */ }
-        el.dispatchEvent(new MouseEvent('mouseup', opts));
-        el.dispatchEvent(new MouseEvent('click', opts));
+
+        dispatchRealClick(target);
 
         // Only force navigation for real URL anchors. Skip in-page (#) and
         // javascript: links - those rely on the JS click we already dispatched,
         // and forcing location would break SPA routers / reload the page.
-        const anchor = el.closest && el.closest('a[href]');
+        const anchor = target.closest && target.closest('a[href]');
         if (anchor && !bannedReason(anchor)) {
             const hrefAttr = (anchor.getAttribute('href') || '').trim();
             if (anchor.href && !/^(#|javascript:)/i.test(hrefAttr)) {
                 window.location.href = anchor.href;
             }
         }
-        return { clicked: selector };
+
+        const clickedTag = target.tagName ? target.tagName.toLowerCase() : 'node';
+        return { clicked: selector, actionedTag: clickedTag };
     }
 
     function domFillRow(rowSelector, values) {
@@ -266,7 +291,7 @@
         clone.querySelectorAll('script, style, noscript, svg, link, meta, head').forEach(n => n.remove());
         let html = clone.outerHTML || '';
         html = html.replace(/\s+/g, ' ').trim();
-        return html.slice(0, maxLen || 18000);
+        return html.slice(0, maxLen || 10000);
     }
 
     function visibleText(maxLen) {
@@ -281,7 +306,7 @@
         return {
             url: location.href,
             title: document.title,
-            html: cleanHtml(18000),
+            html: cleanHtml(10000),
             text: visibleText(8000),
             scroll: {
                 y,

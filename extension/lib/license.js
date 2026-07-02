@@ -81,7 +81,8 @@ export async function verifyLicenseOffline(licenseKeyB64) {
 
     try {
         const publicKey = await importPublicKey();
-        const dataBytes = new TextEncoder().encode(JSON.stringify(payload));
+        const verifiedString = JSON.stringify(payload);
+        const dataBytes = new TextEncoder().encode(verifiedString);
         const sigBuffer = base64ToArrayBuffer(signature);
 
         const isValid = await crypto.subtle.verify(
@@ -92,10 +93,16 @@ export async function verifyLicenseOffline(licenseKeyB64) {
         );
 
         if (!isValid) {
+            // Diagnostic: the string being verified must byte-match what the generator signed.
+            // A mismatch here (key order/whitespace) is the usual cause of cross-platform failures.
+            console.warn('[copilot][license] signature check returned false.',
+                'verifiedString=', verifiedString,
+                'sigLen=', signature.length);
             throw new Error('Cryptographic signature verification failed.');
         }
     } catch (e) {
         if (e.message.includes('signature')) throw e;
+        console.warn('[copilot][license] verify threw:', e && e.message);
         throw new Error(`License signature is invalid: ${e.message}`);
     }
 

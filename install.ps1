@@ -55,18 +55,27 @@ if (-not (Test-Path (Join-Path $ExtSource 'manifest.json'))) {
     exit 1
 }
 
-if (Test-Path $InstallDir) {
-    Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-}
-
+# Versioned-folder install: the extension goes into a fresh app-<timestamp> folder so an
+# upgrade never has to delete files a running browser has locked. The profile lives
+# alongside and persists across upgrades.
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Copy-Item -Path "$ExtSource\*" -Destination $InstallDir -Recurse -Force
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+
+$Stamp = Get-Date -Format 'yyyyMMddHHmmss'
+$AppDir = Join-Path $InstallDir ("app-" + $Stamp)
+New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+Copy-Item -Path "$ExtSource\*" -Destination $AppDir -Recurse -Force
 
 Remove-Item $TempZip -Force -ErrorAction SilentlyContinue
 Remove-Item $TempExtract -Recurse -Force -ErrorAction SilentlyContinue
 
-$LaunchArgs = "--load-extension=`"$InstallDir`" --user-data-dir=`"$ProfileDir`" --no-first-run --no-default-browser-check"
+# Best-effort cleanup of older app-* folders. Any folder locked by a running browser
+# simply stays (harmless) and gets cleaned on a later run.
+Get-ChildItem -Path $InstallDir -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -ne $AppDir } |
+    ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+
+$LaunchArgs = "--load-extension=`"$AppDir`" --user-data-dir=`"$ProfileDir`" --no-first-run --no-default-browser-check"
 
 $ChromePaths = @(
     'C:\Program Files\Google\Chrome\Application\chrome.exe',
@@ -120,7 +129,7 @@ if ($EdgePath) {
 Write-Output ""
 Write-Output "=========================================="
 Write-Output "SUCCESS - Installed to:"
-Write-Output $InstallDir
+Write-Output $AppDir
 Write-Output ""
 Write-Output "IMPORTANT:"
 Write-Output "  Always use the desktop shortcut"

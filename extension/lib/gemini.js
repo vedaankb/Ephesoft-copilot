@@ -7,7 +7,7 @@
  */
 
 const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_TIMEOUT_MS = 120000;
+const DEFAULT_TIMEOUT_MS = 90000;
 
 /**
  * Build an AbortSignal that fires when either the caller's signal aborts or a

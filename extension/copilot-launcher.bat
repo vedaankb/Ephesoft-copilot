@@ -26,12 +26,16 @@ if not exist "%SRC_DIR%manifest.json" (
     exit /b 1
 )
 
+:: Versioned-folder install: copy into a fresh app-<timestamp> folder so upgrades never
+:: need to delete files a running browser has locked. The profile persists across upgrades.
+set "STAMP=%DATE:~-4%%DATE:~4,2%%DATE:~7,2%%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+set "STAMP=%STAMP: =0%"
+set "APP_DIR=%INSTALL_DIR%\app-%STAMP%"
+
 echo Copying extension files to local AppData...
-if exist "%INSTALL_DIR%" (
-    rmdir /s /q "%INSTALL_DIR%" >nul 2>&1
-)
-mkdir "%INSTALL_DIR%" >nul 2>&1
-xcopy /E /I /Y "%SRC_DIR%*" "%INSTALL_DIR%\" >nul
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%" >nul 2>&1
+mkdir "%APP_DIR%" >nul 2>&1
+xcopy /E /I /Y "%SRC_DIR%*" "%APP_DIR%\" >nul
 
 if errorlevel 1 (
     color 0C
@@ -43,9 +47,14 @@ if errorlevel 1 (
 
 if not exist "%PROFILE_DIR%" mkdir "%PROFILE_DIR%" >nul 2>&1
 
+:: Best-effort cleanup of older app-* folders (locked ones are skipped harmlessly).
+for /d %%D in ("%INSTALL_DIR%\app-*") do (
+    if /I not "%%~fD"=="%APP_DIR%" rmdir /s /q "%%~fD" >nul 2>&1
+)
+
 echo Creating Desktop Shortcuts...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$InstallDir = '%INSTALL_DIR%'; ^
+    "$InstallDir = '%APP_DIR%'; ^
      $ProfileDir = '%PROFILE_DIR%'; ^
      $LaunchArgs = '--load-extension=\"' + $InstallDir + '\" --user-data-dir=\"' + $ProfileDir + '\" --no-first-run --no-default-browser-check'; ^
      $DesktopPath = [System.IO.Path]::Combine([System.Environment]::GetFolderPath('Desktop'), ''); ^
@@ -82,7 +91,7 @@ color 0A
 echo ==================================================
 echo    SUCCESS: Ephesoft Copilot Installed!
 echo ==================================================
-echo Extension:  %INSTALL_DIR%
+echo Extension:  %APP_DIR%
 echo Profile:    %PROFILE_DIR%
 echo.
 echo IMPORTANT:
