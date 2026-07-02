@@ -68,12 +68,18 @@
 
     // --- value setting that frameworks (React/Angular/GWT) actually observe ---
     function setNativeValue(el, value) {
-        const proto = el instanceof HTMLTextAreaElement
-            ? HTMLTextAreaElement.prototype
-            : HTMLInputElement.prototype;
-        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (desc && desc.set) desc.set.call(el, value);
-        else el.value = value;
+        let proto = null;
+        if (el instanceof HTMLInputElement) proto = HTMLInputElement.prototype;
+        else if (el instanceof HTMLTextAreaElement) proto = HTMLTextAreaElement.prototype;
+        else if (el instanceof HTMLSelectElement) proto = HTMLSelectElement.prototype;
+
+        if (proto) {
+            const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+            if (desc && desc.set) desc.set.call(el, value);
+            else el.value = value;
+        } else {
+            el.value = value;
+        }
     }
 
     function fireInputEvents(el) {
@@ -101,24 +107,54 @@
         return null;
     }
 
+    function findElementRecursive(root, selector) {
+        let el = null;
+        try { el = root.querySelector(selector); } catch (e) { /* ignore */ }
+        if (el) return el;
+
+        const iframes = Array.from(root.querySelectorAll('iframe'));
+        for (const iframe of iframes) {
+            try {
+                if (iframe.contentDocument) {
+                    el = findElementRecursive(iframe.contentDocument, selector);
+                    if (el) return el;
+                }
+            } catch (e) { /* cross-origin */ }
+        }
+        return null;
+    }
+
     function query(selector) {
         if (!selector) throw new Error('No selector provided');
+
+        // BASELINE (original behavior): a plain top-document lookup. This always runs
+        // first and is the source of truth for "invalid selector" errors.
         let el = null;
         let cssError = null;
         try { el = document.querySelector(selector); }
         catch (e) { cssError = e.message; }
         if (el) return el;
 
-        // The exact CSS selector failed (invalid, or the element ID/class changed).
-        // Try to recover by treating the selector as a hint and matching against
-        // common attributes and visible labels before giving up.
-        const recovered = recoverElement(selector);
-        if (recovered) return recovered;
+        // ENHANCEMENT 1 (additive): search same-origin iframes. Fully guarded so any
+        // failure here can never break the baseline path above.
+        try {
+            const inFrame = findElementRecursive(document, selector);
+            if (inFrame) return inFrame;
+        } catch (e) { /* enhancement failed - ignore, fall through */ }
 
+        // ENHANCEMENT 2 (additive): fuzzy recovery by label/attribute hint. Guarded.
+        try {
+            const recovered = recoverElementRecursive(document, selector);
+            if (recovered) return recovered;
+        } catch (e) { /* enhancement failed - ignore, fall through */ }
+
+        // Build a helpful error; the hint is best-effort and must not throw.
+        let hint = '';
+        try { hint = nearbyHintRecursive(document, selector); } catch (e) { hint = ''; }
         if (cssError) {
-            throw new Error(`Invalid selector '${selector}': ${cssError}. ${nearbyHint(selector)}`);
+            throw new Error(`Invalid selector '${selector}': ${cssError}. ${hint}`);
         }
-        throw new Error(`Element not found: ${selector}. ${nearbyHint(selector)}`);
+        throw new Error(`Element not found: ${selector}. ${hint}`);
     }
 
     // Pull a human-readable hint token out of a selector so we can fuzzy-match it
@@ -133,7 +169,7 @@
     }
 
     // Best-effort element recovery when a CSS selector no longer resolves.
-    function recoverElement(selector) {
+    function recoverElementRecursive(root, selector) {
         const hint = selectorHint(selector);
         if (!hint || hint.length < 2) return null;
         const attrSel = [
@@ -143,17 +179,19 @@
             `[id*="${hint}" i]`,
             `[title*="${hint}" i]`,
         ].join(',');
+        
+        // 1. Try attribute matching on the current root
         let el = null;
-        try { el = document.querySelector(attrSel); } catch (e) { /* ignore */ }
+        try { el = root.querySelector(attrSel); } catch (e) { /* ignore */ }
         if (el) return el;
 
-        // Fall back to a <label> whose text contains the hint -> its bound control.
+        // 2. Try label matching on the current root
         try {
-            const labels = Array.from(document.querySelectorAll('label'));
+            const labels = Array.from(root.querySelectorAll('label'));
             for (const lab of labels) {
                 if ((lab.innerText || '').toLowerCase().includes(hint)) {
                     if (lab.htmlFor) {
-                        const bound = document.getElementById(lab.htmlFor);
+                        const bound = root.getElementById(lab.htmlFor);
                         if (bound) return bound;
                     }
                     const inner = lab.querySelector('input, textarea, select, [contenteditable="true"]');
@@ -161,24 +199,53 @@
                 }
             }
         } catch (e) { /* ignore */ }
+
+        // 3. Recurse into same-origin iframes
+        const iframes = Array.from(root.querySelectorAll('iframe'));
+        for (const iframe of iframes) {
+            try {
+                if (iframe.contentDocument) {
+                    el = recoverElementRecursive(iframe.contentDocument, selector);
+                    if (el) return el;
+                }
+            } catch (e) { /* cross-origin */ }
+        }
         return null;
     }
 
     // Produce a short list of visible candidate fields to help the model retry.
-    function nearbyHint(selector) {
+    function nearbyHintRecursive(root, selector) {
         try {
             const hint = selectorHint(selector);
-            const fields = Array.from(document.querySelectorAll('input, textarea, select'))
-                .filter(f => f.offsetParent !== null)
-                .slice(0, 8)
-                .map(f => {
-                    const id = f.id ? `#${f.id}` : '';
-                    const nm = f.name ? `[name="${f.name}"]` : '';
-                    const ph = f.placeholder ? ` ph="${f.placeholder}"` : '';
-                    return (id || nm || f.tagName.toLowerCase()) + ph;
-                });
-            if (!fields.length) return 'No visible input fields detected - the target may be in an iframe or not yet loaded.';
-            return `Nearby fields you can target instead: ${fields.join(', ')}.`;
+            const allFields = [];
+            
+            function collectFields(node) {
+                try {
+                    const fields = Array.from(node.querySelectorAll('input, textarea, select'))
+                        .filter(f => f.offsetParent !== null)
+                        .map(f => {
+                            const id = f.id ? `#${f.id}` : '';
+                            const nm = f.name ? `[name="${f.name}"]` : '';
+                            const ph = f.placeholder ? ` ph="${f.placeholder}"` : '';
+                            return (id || nm || f.tagName.toLowerCase()) + ph;
+                        });
+                    allFields.push(...fields);
+                } catch (e) { /* ignore */ }
+
+                const iframes = Array.from(node.querySelectorAll('iframe'));
+                for (const iframe of iframes) {
+                    try {
+                        if (iframe.contentDocument) {
+                            collectFields(iframe.contentDocument);
+                        }
+                    } catch (e) { /* cross-origin */ }
+                }
+            }
+
+            collectFields(root);
+            const sliced = allFields.slice(0, 8);
+            if (!sliced.length) return 'No visible input fields detected - the target may be in an inaccessible iframe or not yet loaded.';
+            return `Nearby fields you can target instead: ${sliced.join(', ')}.`;
         } catch (e) {
             return '';
         }
@@ -302,9 +369,29 @@
         for (let i = 0; i < values.length && i < inputs.length; i += 1) {
             const el = inputs[i];
             el.focus && el.focus();
-            if (el instanceof HTMLSelectElement) el.value = values[i];
-            else if ('value' in el) setNativeValue(el, values[i]);
-            else el.textContent = values[i];
+            const val = values[i];
+            if (el instanceof HTMLSelectElement) {
+                // Use the same smart option matching as domSelect
+                const want = String(val).toLowerCase().trim();
+                let matched = null;
+                for (const opt of el.options) {
+                    const ov = (opt.value || '').toLowerCase().trim();
+                    const ot = (opt.text || '').toLowerCase().trim();
+                    if (ov === want || ot === want || ot.includes(want) || ov.includes(want)) {
+                        matched = opt.value;
+                        break;
+                    }
+                }
+                if (matched !== null) {
+                    setNativeValue(el, matched);
+                } else {
+                    setNativeValue(el, val);
+                }
+            } else if ('value' in el) {
+                setNativeValue(el, val);
+            } else {
+                el.textContent = val;
+            }
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             el.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -362,24 +449,106 @@
 
     // Send as much of the DOM as we reasonably can - gemini-2.5-pro has a huge
     // context window, so the limiting factor is signal, not size. We strip only
-    // truly useless nodes (scripts/styles/svg/comments/data-URIs) and keep the
-    // rest so every field selector on the page is visible to the model.
+    // truly useless nodes (scripts/styles/svg/comments/data-URIs) and recursively
+    // inline same-origin iframe contents so the model has complete page visibility.
     const HTML_MAX = 500000;
 
-    function cleanHtml(maxLen) {
-        const clone = document.documentElement.cloneNode(true);
+    // Compress + cap a cloned root element into the string we send to the model.
+    function serializeClone(clone, cap) {
         clone.querySelectorAll('script, style, noscript, svg, link, meta, head').forEach(n => n.remove());
         let html = clone.outerHTML || '';
         html = html.replace(/<!--[\s\S]*?-->/g, '');            // drop HTML comments
         html = html.replace(/(src|href)="data:[^"]*"/gi, '$1="data:..."'); // shrink inline data URIs
         html = html.replace(/\s+/g, ' ').trim();
-        const cap = maxLen || HTML_MAX;
         return html.slice(0, cap);
     }
 
+    // BASELINE (original behavior): top-document only. Never throws for iframe reasons.
+    function cleanHtmlBasic(cap) {
+        const clone = document.documentElement.cloneNode(true);
+        return serializeClone(clone, cap);
+    }
+
+    // ENHANCEMENT (additive): also inline same-origin iframe contents. If ANYTHING
+    // in here fails, cleanHtml() falls back to cleanHtmlBasic so observation never breaks.
+    function cleanHtmlWithFrames(cap) {
+        const realIframes = Array.from(document.querySelectorAll('iframe'));
+        if (!realIframes.length) return cleanHtmlBasic(cap); // nothing extra to do
+
+        realIframes.forEach((iframe, idx) => {
+            try { iframe.setAttribute('data-copilot-iframe-idx', idx); } catch (e) { /* ignore */ }
+        });
+        const clone = document.documentElement.cloneNode(true);
+        // Always untag the live DOM immediately, even if later steps throw.
+        realIframes.forEach(iframe => {
+            try { iframe.removeAttribute('data-copilot-iframe-idx'); } catch (e) { /* ignore */ }
+        });
+
+        clone.querySelectorAll('script, style, noscript, svg, link, meta, head').forEach(n => n.remove());
+
+        clone.querySelectorAll('iframe').forEach(clonedIframe => {
+            const idxAttr = clonedIframe.getAttribute('data-copilot-iframe-idx');
+            if (idxAttr === null) return;
+            const realIframe = realIframes[parseInt(idxAttr, 10)];
+            try {
+                if (realIframe && realIframe.contentDocument) {
+                    const iframeClone = realIframe.contentDocument.documentElement.cloneNode(true);
+                    iframeClone.querySelectorAll('script, style, noscript, svg, link, meta, head').forEach(n => n.remove());
+                    const container = document.createElement('div');
+                    container.setAttribute('data-iframe-id', realIframe.id || '');
+                    container.setAttribute('data-iframe-name', realIframe.name || '');
+                    container.setAttribute('data-iframe-src', realIframe.src || '');
+                    container.innerHTML = iframeClone.innerHTML;
+                    clonedIframe.replaceWith(container);
+                }
+            } catch (e) { /* cross-origin - leave the <iframe> tag as-is */ }
+        });
+
+        let html = clone.outerHTML || '';
+        html = html.replace(/<!--[\s\S]*?-->/g, '');
+        html = html.replace(/(src|href)="data:[^"]*"/gi, '$1="data:..."');
+        html = html.replace(/\s+/g, ' ').trim();
+        return html.slice(0, cap);
+    }
+
+    function cleanHtml(maxLen) {
+        const cap = maxLen || HTML_MAX;
+        try {
+            return cleanHtmlWithFrames(cap);
+        } catch (e) {
+            // Enhancement failed for any reason - guarantee the original behavior.
+            try { return cleanHtmlBasic(cap); }
+            catch (e2) { return ''; }
+        }
+    }
+
     function visibleText(maxLen) {
-        const t = (document.body && document.body.innerText) || '';
-        return t.replace(/\n{3,}/g, '\n\n').slice(0, maxLen || 40000);
+        const cap = maxLen || 40000;
+        // BASELINE (original behavior): top-document innerText.
+        const baseText = (document.body && document.body.innerText) || '';
+        // ENHANCEMENT (additive): append same-origin iframe text. Guarded so a failure
+        // just returns the baseline instead of breaking observation.
+        let fullText = baseText;
+        try {
+            function getFrameText(doc) {
+                let t = '';
+                const iframes = Array.from(doc.querySelectorAll('iframe'));
+                for (const iframe of iframes) {
+                    try {
+                        if (iframe.contentDocument) {
+                            const body = iframe.contentDocument.body;
+                            if (body && body.innerText) t += '\n\n' + body.innerText;
+                            t += getFrameText(iframe.contentDocument);
+                        }
+                    } catch (e) { /* cross-origin */ }
+                }
+                return t;
+            }
+            fullText = baseText + getFrameText(document);
+        } catch (e) {
+            fullText = baseText;
+        }
+        return fullText.replace(/\n{3,}/g, '\n\n').slice(0, cap);
     }
 
     function observe() {

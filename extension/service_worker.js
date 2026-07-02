@@ -211,13 +211,31 @@ async function ensureContentScript(tabId) {
 }
 
 async function sendToTab(tabId, payload) {
-    try {
-        return await chrome.tabs.sendMessage(tabId, payload);
-    } catch (e) {
-        // Content script may not be present (fresh navigation / first load). Inject + retry.
-        await injectContentScript(tabId);
-        return await chrome.tabs.sendMessage(tabId, payload);
+    const maxRetries = 3;
+    let lastSendError = null;
+    let injectError = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await chrome.tabs.sendMessage(tabId, payload);
+        } catch (e) {
+            lastSendError = e;
+            // Content script may not be present yet (fresh navigation / first load).
+            // Try to (re)inject once, but don't treat an injection hiccup as fatal -
+            // the script might still register on its own; keep retrying the send.
+            if (attempt === 1) {
+                try {
+                    await injectContentScript(tabId);
+                } catch (injErr) {
+                    injectError = injErr;
+                }
+            }
+            // Exponential backoff: let the page settle or the listener register.
+            await sleep(attempt * 150);
+        }
     }
+    // Prefer the friendlier injection message (e.g. "page cannot be automated") when we have one.
+    if (injectError) throw injectError;
+    throw new Error(`Could not reach the page after ${maxRetries} attempts: ${lastSendError && lastSendError.message ? lastSendError.message : lastSendError}`);
 }
 
 async function captureViewport(windowId) {

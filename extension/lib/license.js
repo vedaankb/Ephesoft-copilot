@@ -11,13 +11,70 @@ const PUBLIC_KEY_B64 = 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAENjggM1sgS+0M9BwDfKPY
 // Internal developer bypass — not a single character; share only with trusted testers.
 const DEV_BYPASS_KEY = 'EPHESOFT-DEV-BYPASS-7K9M2P';
 
-function base64ToArrayBuffer(b64) {
+function base64ToUint8Array(b64) {
     const binary = atob(b64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
         bytes[i] = binary.charCodeAt(i);
     }
-    return bytes.buffer;
+    return bytes;
+}
+
+function base64ToArrayBuffer(b64) {
+    return base64ToUint8Array(b64).buffer;
+}
+
+/**
+ * Normalize an ECDSA signature to the raw r||s (IEEE-P1363) form that Web Crypto
+ * requires. Node's crypto.sign() emits DER/ASN.1 by default (a SEQUENCE of two
+ * INTEGERs), which crypto.subtle.verify rejects. If the signature is already the
+ * raw 64-byte form we return it unchanged.
+ * @param {Uint8Array} sig
+ * @returns {Uint8Array} 64-byte r||s signature for P-256
+ */
+function toRawEcdsaSignature(sig) {
+    // Already raw r||s for P-256 (32 + 32). Nothing to do.
+    if (sig.length === 64) return sig;
+
+    // DER: 0x30 <len> 0x02 <rlen> <r> 0x02 <slen> <s>
+    if (sig[0] !== 0x30) {
+        // Unknown encoding - hand it back and let verify fail loudly.
+        return sig;
+    }
+
+    let offset = 2;
+    if (sig[1] & 0x80) {
+        // Long-form length (rare for P-256, but handle it).
+        offset = 2 + (sig[1] & 0x7f);
+    }
+
+    if (sig[offset] !== 0x02) throw new Error('Malformed signature (expected INTEGER r).');
+    const rLen = sig[offset + 1];
+    let r = sig.slice(offset + 2, offset + 2 + rLen);
+    offset = offset + 2 + rLen;
+
+    if (sig[offset] !== 0x02) throw new Error('Malformed signature (expected INTEGER s).');
+    const sLen = sig[offset + 1];
+    let s = sig.slice(offset + 2, offset + 2 + sLen);
+
+    // Strip DER's leading sign-byte zeros, then left-pad each to 32 bytes.
+    const pad32 = (buf) => {
+        let b = buf;
+        while (b.length > 32 && b[0] === 0x00) b = b.slice(1);
+        if (b.length < 32) {
+            const out = new Uint8Array(32);
+            out.set(b, 32 - b.length);
+            return out;
+        }
+        return b;
+    };
+
+    const rP = pad32(r);
+    const sP = pad32(s);
+    const raw = new Uint8Array(64);
+    raw.set(rP, 0);
+    raw.set(sP, 32);
+    return raw;
 }
 
 async function importPublicKey() {
@@ -81,23 +138,28 @@ export async function verifyLicenseOffline(licenseKeyB64) {
 
     try {
         const publicKey = await importPublicKey();
-        const verifiedString = JSON.stringify(payload);
+        // Deterministic serialization: ensure key order is identical to what the generator signed,
+        // completely eliminating cross-platform property-ordering discrepancies.
+        const verifiedString = JSON.stringify({
+            ...(payload.v !== undefined ? { v: payload.v } : {}),
+            client: payload.client,
+            expires: payload.expires
+        });
         const dataBytes = new TextEncoder().encode(verifiedString);
-        const sigBuffer = base64ToArrayBuffer(signature);
+        // Convert Node's DER signature to the raw r||s form Web Crypto requires.
+        const sigRaw = toRawEcdsaSignature(base64ToUint8Array(signature));
 
         const isValid = await crypto.subtle.verify(
             { name: 'ECDSA', hash: { name: 'SHA-256' } },
             publicKey,
-            sigBuffer,
+            sigRaw,
             dataBytes
         );
 
         if (!isValid) {
-            // Diagnostic: the string being verified must byte-match what the generator signed.
-            // A mismatch here (key order/whitespace) is the usual cause of cross-platform failures.
             console.warn('[copilot][license] signature check returned false.',
                 'verifiedString=', verifiedString,
-                'sigLen=', signature.length);
+                'sigLen=', sigRaw.length);
             throw new Error('Cryptographic signature verification failed.');
         }
     } catch (e) {
