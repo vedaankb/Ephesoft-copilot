@@ -1,225 +1,137 @@
-# Ephesoft Copilot - 1-Click PowerShell Bootstrap Installer
-#
-# Downloads the repo, installs the extension to %LOCALAPPDATA%, and creates
-# desktop shortcuts that launch Chrome/Edge with a dedicated profile.
-#
-# Recommended (avoids irm|iex quirks):
-#   $u='https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1'
-#   $f="$env:TEMP\ephesoft-install.ps1"; iwr $u -OutFile $f -UseBasicParsing; & $f
-#
-# One-liner alternative:
-#   iex (& ([Net.WebClient]::new()).DownloadString('https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/install.ps1'))
+# Ephesoft Copilot Installer
+# Download, install, and create shortcuts for Chrome/Edge
 
 $ErrorActionPreference = 'Stop'
 
-function Ensure-WindowsEnv {
-    if (-not $env:USERPROFILE) {
-        throw 'USERPROFILE is not set. Open a normal user PowerShell window and retry.'
-    }
-    if (-not $env:LOCALAPPDATA) {
-        $env:LOCALAPPDATA = [System.IO.Path]::Combine($env:USERPROFILE, 'AppData', 'Local')
-    }
-    if (-not $env:TEMP) {
-        $env:TEMP = [System.IO.Path]::GetTempPath().TrimEnd('\')
-    }
+Write-Output "=========================================="
+Write-Output "Ephesoft Copilot Installer"
+Write-Output "=========================================="
+
+if (-not $env:USERPROFILE) {
+    Write-Output "ERROR: USERPROFILE not set"
+    exit 1
 }
 
-function Get-EphesoftInstallPaths {
-    Ensure-WindowsEnv
-    $installDir = [System.IO.Path]::Combine($env:LOCALAPPDATA, 'EphesoftCopilot')
-    $profileDir = [System.IO.Path]::Combine($installDir, 'profile')
-    return @{ InstallDir = $installDir; ProfileDir = $profileDir }
+if (-not $env:LOCALAPPDATA) {
+    $env:LOCALAPPDATA = Join-Path $env:USERPROFILE 'AppData\Local'
 }
 
-function Find-BrowserPath {
-    param([string[]]$Candidates)
-    foreach ($p in $Candidates) {
-        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
-    }
-    return $null
+if (-not $env:TEMP) {
+    $env:TEMP = [System.IO.Path]::GetTempPath().TrimEnd('\')
 }
 
-function Get-ChromePath {
-    Ensure-WindowsEnv
-    return Find-BrowserPath @(
-        'C:\Program Files\Google\Chrome\Application\chrome.exe',
-        'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
-        ([System.IO.Path]::Combine($env:LOCALAPPDATA, 'Google\Chrome\Application\chrome.exe'))
-    )
-}
+$InstallDir = Join-Path $env:LOCALAPPDATA 'EphesoftCopilot'
+$ProfileDir = Join-Path $InstallDir 'profile'
+$TempZip = Join-Path $env:TEMP 'ephesoft-temp.zip'
+$TempExtract = Join-Path $env:TEMP 'ephesoft-extract'
+$RepoUrl = 'https://github.com/vedaankb/Ephesoft-copilot/archive/refs/heads/main.zip'
 
-function Get-EdgePath {
-    Ensure-WindowsEnv
-    return Find-BrowserPath @(
-        'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
-        'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
-        ([System.IO.Path]::Combine($env:LOCALAPPDATA, 'Microsoft\Edge\Application\msedge.exe'))
-    )
-}
+Write-Output "Downloading from GitHub..."
+if (Test-Path $TempZip) { Remove-Item $TempZip -Force }
+if (Test-Path $TempExtract) { Remove-Item $TempExtract -Recurse -Force }
 
-function Get-ExtensionLaunchArgs {
-    param([string]$InstallDir, [string]$ProfileDir)
-    return "--load-extension=`"$InstallDir`" --user-data-dir=`"$ProfileDir`" --no-first-run --no-default-browser-check"
-}
-
-function New-EphesoftShortcut {
-    param(
-        [string]$ShortcutName,
-        [string]$BrowserPath,
-        [string]$Arguments,
-        [string]$DesktopPath
-    )
-    $shortcutPath = [System.IO.Path]::Combine($DesktopPath, "$ShortcutName.lnk")
-    $ws = New-Object -ComObject WScript.Shell
-    $lnk = $ws.CreateShortcut($shortcutPath)
-    $lnk.TargetPath = $BrowserPath
-    $lnk.Arguments = $Arguments
-    $lnk.WorkingDirectory = $env:USERPROFILE
-    $lnk.Description = 'Launch browser with Ephesoft Copilot (dedicated profile)'
-    $lnk.IconLocation = "$BrowserPath,0"
-    $lnk.Save()
-}
-
-function Remove-IfExists {
-    param([string]$Target)
-    if ($Target -and (Test-Path -LiteralPath $Target)) {
-        Remove-Item -LiteralPath $Target -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-# --- main ---
-Ensure-WindowsEnv
-
-Write-Host '==================================================' -ForegroundColor Cyan
-Write-Host '          EPHESOFT COPILOT INSTALLER              ' -ForegroundColor Cyan
-Write-Host '==================================================' -ForegroundColor Cyan
-Write-Host 'Installing Ephesoft Copilot (V2 Pure Extension)...' -ForegroundColor Yellow
-
-$paths = Get-EphesoftInstallPaths
-$InstallDir = $paths.InstallDir
-$ProfileDir = $paths.ProfileDir
-$TempZip = [System.IO.Path]::Combine($env:TEMP, 'ephesoft-copilot-temp.zip')
-$TempExtract = [System.IO.Path]::Combine($env:TEMP, 'ephesoft-copilot-temp-extract')
-$StagingDir = [System.IO.Path]::Combine($env:TEMP, 'ephesoft-copilot-staging')
-$RepoZipUrl = 'https://github.com/vedaankb/Ephesoft-copilot/archive/refs/heads/main.zip'
-
-Remove-IfExists $TempZip
-Remove-IfExists $TempExtract
-Remove-IfExists $StagingDir
-
-Write-Host 'Downloading latest version from GitHub...' -ForegroundColor Yellow
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $RepoZipUrl -OutFile $TempZip -UseBasicParsing
+    Invoke-WebRequest -Uri $RepoUrl -OutFile $TempZip -UseBasicParsing
 } catch {
-    Write-Host 'ERROR: Failed to download. Check internet/proxy settings.' -ForegroundColor Red
-    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Output "ERROR: Download failed"
+    Write-Output $_.Exception.Message
     exit 1
 }
 
-if (-not (Test-Path -LiteralPath $TempZip)) {
-    Write-Host 'ERROR: Download did not create a zip file.' -ForegroundColor Red
+Write-Output "Extracting..."
+Expand-Archive -Path $TempZip -DestinationPath $TempExtract -Force
+$RepoRoot = Join-Path $TempExtract 'Ephesoft-copilot-main'
+
+if (-not (Test-Path $RepoRoot)) {
+    Write-Output "ERROR: Extraction failed"
     exit 1
 }
 
-Write-Host 'Extracting repository...' -ForegroundColor Yellow
-New-Item -ItemType Directory -Force -Path $TempExtract | Out-Null
-Expand-Archive -LiteralPath $TempZip -DestinationPath $TempExtract -Force
-
-$RepoRoot = [System.IO.Path]::Combine($TempExtract, 'Ephesoft-copilot-main')
-if (-not (Test-Path -LiteralPath $RepoRoot)) {
-    Write-Host 'ERROR: Unexpected zip layout — Ephesoft-copilot-main folder not found.' -ForegroundColor Red
+Write-Output "Installing extension..."
+$ExtSource = Join-Path $RepoRoot 'extension'
+if (-not (Test-Path (Join-Path $ExtSource 'manifest.json'))) {
+    Write-Output "ERROR: Extension files not found"
     exit 1
 }
 
-# Build obfuscated package when Node.js is available.
-$PackagedZip = $null
-$NodeCmd = Get-Command node -ErrorAction SilentlyContinue
-if ($NodeCmd) {
-    Write-Host 'Building obfuscated extension package (Node.js detected)...' -ForegroundColor Yellow
-    Push-Location -LiteralPath $RepoRoot
-    try {
-        npm install --silent 2>$null
-        node scripts/generate_icons.js 2>$null
-        node scripts/package_extension.js
-        $manifestPath = [System.IO.Path]::Combine($RepoRoot, 'extension', 'manifest.json')
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        $ver = if ($manifest.version) { $manifest.version } else { '0.0.0' }
-        $candidate = [System.IO.Path]::Combine($RepoRoot, "dist\ephesoft-copilot-extension-v$ver.zip")
-        if (Test-Path -LiteralPath $candidate) { $PackagedZip = $candidate }
-    } catch {
-        Write-Host 'WARNING: Obfuscated build failed — falling back to source extension.' -ForegroundColor Yellow
-    } finally {
-        Pop-Location
-    }
-} else {
-    Write-Host 'Node.js not found — installing source extension (unobfuscated).' -ForegroundColor Yellow
+if (Test-Path $InstallDir) {
+    Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host 'Installing extension files...' -ForegroundColor Yellow
-Remove-IfExists $StagingDir
-New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
-
-if ($PackagedZip) {
-    Expand-Archive -LiteralPath $PackagedZip -DestinationPath $StagingDir -Force
-} else {
-    $ExtSource = [System.IO.Path]::Combine($RepoRoot, 'extension')
-    $manifestCheck = [System.IO.Path]::Combine($ExtSource, 'manifest.json')
-    if (-not (Test-Path -LiteralPath $manifestCheck)) {
-        Write-Host 'ERROR: extension folder not found in downloaded repo.' -ForegroundColor Red
-        exit 1
-    }
-    # Copy contents of extension/ into staging (not the folder itself).
-    Get-ChildItem -LiteralPath $ExtSource | Copy-Item -Destination $StagingDir -Recurse -Force
-}
-
-Remove-IfExists $InstallDir
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Get-ChildItem -LiteralPath $StagingDir | Copy-Item -Destination $InstallDir -Recurse -Force
-
-Remove-IfExists $StagingDir
-Remove-IfExists $TempZip
-Remove-IfExists $TempExtract
+Copy-Item -Path "$ExtSource\*" -Destination $InstallDir -Recurse -Force
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
 
-$ChromePath = Get-ChromePath
-$EdgePath = Get-EdgePath
-$LaunchArgs = Get-ExtensionLaunchArgs -InstallDir $InstallDir -ProfileDir $ProfileDir
-$DesktopPath = [System.Environment]::GetFolderPath('Desktop')
+Remove-Item $TempZip -Force -ErrorAction SilentlyContinue
+Remove-Item $TempExtract -Recurse -Force -ErrorAction SilentlyContinue
 
-$CreatedShortcuts = 0
+$LaunchArgs = "--load-extension=`"$InstallDir`" --user-data-dir=`"$ProfileDir`" --no-first-run --no-default-browser-check"
+
+$ChromePaths = @(
+    'C:\Program Files\Google\Chrome\Application\chrome.exe',
+    'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+    (Join-Path $env:LOCALAPPDATA 'Google\Chrome\Application\chrome.exe')
+)
+
+$EdgePaths = @(
+    'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+    'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe')
+)
+
+$ChromePath = $null
+foreach ($p in $ChromePaths) {
+    if (Test-Path $p) { $ChromePath = $p; break }
+}
+
+$EdgePath = $null
+foreach ($p in $EdgePaths) {
+    if (Test-Path $p) { $EdgePath = $p; break }
+}
+
+$Desktop = [System.Environment]::GetFolderPath('Desktop')
+$WshShell = New-Object -ComObject WScript.Shell
+
+$Created = 0
+
 if ($ChromePath) {
-    Write-Host 'Creating Google Chrome desktop shortcut...' -ForegroundColor Yellow
-    New-EphesoftShortcut -ShortcutName 'Ephesoft Copilot (Chrome)' -BrowserPath $ChromePath -Arguments $LaunchArgs -DesktopPath $DesktopPath
-    $CreatedShortcuts++
-} else {
-    Write-Host 'Google Chrome not found — skipping Chrome shortcut.' -ForegroundColor Gray
+    Write-Output "Creating Chrome shortcut..."
+    $Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop 'Ephesoft Copilot (Chrome).lnk'))
+    $Shortcut.TargetPath = $ChromePath
+    $Shortcut.Arguments = $LaunchArgs
+    $Shortcut.WorkingDirectory = $env:USERPROFILE
+    $Shortcut.IconLocation = "$ChromePath,0"
+    $Shortcut.Save()
+    $Created++
 }
 
 if ($EdgePath) {
-    Write-Host 'Creating Microsoft Edge desktop shortcut...' -ForegroundColor Yellow
-    New-EphesoftShortcut -ShortcutName 'Ephesoft Copilot (Edge)' -BrowserPath $EdgePath -Arguments $LaunchArgs -DesktopPath $DesktopPath
-    $CreatedShortcuts++
-} else {
-    Write-Host 'Microsoft Edge not found — skipping Edge shortcut.' -ForegroundColor Gray
+    Write-Output "Creating Edge shortcut..."
+    $Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop 'Ephesoft Copilot (Edge).lnk'))
+    $Shortcut.TargetPath = $EdgePath
+    $Shortcut.Arguments = $LaunchArgs
+    $Shortcut.WorkingDirectory = $env:USERPROFILE
+    $Shortcut.IconLocation = "$EdgePath,0"
+    $Shortcut.Save()
+    $Created++
 }
 
-Write-Host ''
-Write-Host '==================================================' -ForegroundColor Green
-Write-Host '    SUCCESS: Ephesoft Copilot Installed!          ' -ForegroundColor Green
-Write-Host '==================================================' -ForegroundColor Green
-Write-Host "Extension:  $InstallDir" -ForegroundColor White
-Write-Host "Profile:    $ProfileDir" -ForegroundColor White
-Write-Host ''
-Write-Host 'IMPORTANT:' -ForegroundColor Yellow
-Write-Host '  Always launch via the desktop shortcut (dedicated browser profile).' -ForegroundColor White
-Write-Host '  Log into Ephesoft inside this dedicated profile on first use.' -ForegroundColor White
-if ($CreatedShortcuts -gt 0) {
-    Write-Host ''
-    Write-Host 'Double-click a desktop shortcut to start.' -ForegroundColor White
+Write-Output ""
+Write-Output "=========================================="
+Write-Output "SUCCESS - Installed to:"
+Write-Output $InstallDir
+Write-Output ""
+Write-Output "IMPORTANT:"
+Write-Output "  Always use the desktop shortcut"
+Write-Output "  (dedicated browser profile)"
+Write-Output ""
+
+if ($Created -eq 0) {
+    Write-Output "No browser found"
+    Write-Output "Load manually at chrome://extensions"
 } else {
-    Write-Host ''
-    Write-Host "No browser found — load manually:" -ForegroundColor Yellow
-    Write-Host "  chrome://extensions -> Load unpacked -> $InstallDir" -ForegroundColor White
+    Write-Output "Double-click the desktop shortcut to start"
 }
-Write-Host '==================================================' -ForegroundColor Green
+
+Write-Output "=========================================="
