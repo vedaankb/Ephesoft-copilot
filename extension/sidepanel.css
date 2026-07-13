@@ -212,8 +212,19 @@ main::-webkit-scrollbar-thumb:hover {
 /* --- Buttons & Actions --- */
 .actions {
     display: grid;
-    grid-template-columns: 1fr 1fr auto;
+    grid-template-columns: 1fr 1fr;
     gap: 10px;
+}
+
+.actions .btn-danger,
+.actions .btn-secondary {
+    grid-column: span 1;
+}
+
+@media (min-width: 360px) {
+    .actions {
+        grid-template-columns: 1fr 1fr auto auto;
+    }
 }
 
 .btn {

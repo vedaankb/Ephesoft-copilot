@@ -1,10 +1,19 @@
-# Ephesoft Copilot Installer
-# Download, install, and create shortcuts for Chrome/Edge
+# Ephesoft Copilot Updater
+# Pulls the latest main branch and refreshes the installed extension without a full reinstall.
+# Preserves the dedicated browser profile (license key, Gemini settings, cookies).
+#
+# Usage (existing install):
+#   powershell -ExecutionPolicy Bypass -File "$env:LOCALAPPDATA\EphesoftCopilot\update.ps1"
+#
+# Or one-liner from the web (same as install, but update endpoint):
+#   $url = 'https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/update.ps1'
+#   $file = "$env:TEMP\ephesoft-update.ps1"
+#   Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing; & $file
 
 $ErrorActionPreference = 'Stop'
 
 Write-Output "=========================================="
-Write-Output "Ephesoft Copilot Installer"
+Write-Output "Ephesoft Copilot Updater"
 Write-Output "=========================================="
 
 if (-not $env:USERPROFILE) {
@@ -22,11 +31,45 @@ if (-not $env:TEMP) {
 
 $InstallDir = Join-Path $env:LOCALAPPDATA 'EphesoftCopilot'
 $ProfileDir = Join-Path $InstallDir 'profile'
-$TempZip = Join-Path $env:TEMP 'ephesoft-temp.zip'
-$TempExtract = Join-Path $env:TEMP 'ephesoft-extract'
+$TempZip = Join-Path $env:TEMP 'ephesoft-update.zip'
+$TempExtract = Join-Path $env:TEMP 'ephesoft-update-extract'
 $RepoUrl = 'https://github.com/vedaankb/Ephesoft-copilot/archive/refs/heads/main.zip'
 
-Write-Output "Downloading from GitHub..."
+if (-not (Test-Path $InstallDir)) {
+    Write-Output "No existing install found at:"
+    Write-Output "  $InstallDir"
+    Write-Output "Run install.ps1 first, then use update.ps1 for later upgrades."
+    exit 1
+}
+
+# Warn if a Copilot browser profile is currently locked by a running process.
+function Test-ProfileInUse {
+    param([string]$ProfileDir)
+    foreach ($name in @('chrome.exe', 'msedge.exe')) {
+        try {
+            $procs = Get-CimInstance Win32_Process -Filter "Name='$name'" -ErrorAction SilentlyContinue
+            foreach ($proc in $procs) {
+                if ($proc.CommandLine -and $proc.CommandLine -like "*$ProfileDir*") {
+                    return $true
+                }
+            }
+        } catch {
+            # Best-effort only.
+        }
+    }
+    return $false
+}
+
+if (Test-ProfileInUse -ProfileDir $ProfileDir) {
+    Write-Output ""
+    Write-Output "WARNING: Ephesoft Copilot browser appears to be running."
+    Write-Output "Close Chrome/Edge windows started from the Copilot shortcut,"
+    Write-Output "then re-run update.ps1 for a clean upgrade."
+    Write-Output "Continuing with a versioned app folder (safe if files are locked)..."
+    Write-Output ""
+}
+
+Write-Output "Downloading latest from GitHub..."
 if (Test-Path $TempZip) { Remove-Item $TempZip -Force }
 if (Test-Path $TempExtract) { Remove-Item $TempExtract -Recurse -Force }
 
@@ -48,16 +91,13 @@ if (-not (Test-Path $RepoRoot)) {
     exit 1
 }
 
-Write-Output "Installing extension..."
 $ExtSource = Join-Path $RepoRoot 'extension'
 if (-not (Test-Path (Join-Path $ExtSource 'manifest.json'))) {
-    Write-Output "ERROR: Extension files not found"
+    Write-Output "ERROR: Extension files not found in download"
     exit 1
 }
 
-# Versioned-folder install: the extension goes into a fresh app-<timestamp> folder so an
-# upgrade never has to delete files a running browser has locked. The profile lives
-# alongside and persists across upgrades.
+# Versioned-folder update: never delete the live folder a browser may have locked.
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
 
@@ -66,7 +106,7 @@ $AppDir = Join-Path $InstallDir ("app-" + $Stamp)
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
 Copy-Item -Path "$ExtSource\*" -Destination $AppDir -Recurse -Force
 
-# Ship the updater next to the install so pilots can upgrade without reinstalling.
+# Keep a local copy of this updater next to the install so pilots can re-run offline-ish.
 try {
     $UpdaterSrc = Join-Path $RepoRoot 'update.ps1'
     if (Test-Path $UpdaterSrc) {
@@ -76,11 +116,23 @@ try {
     # Non-fatal.
 }
 
+# Write a tiny version stamp for support.
+try {
+    $Manifest = Get-Content (Join-Path $AppDir 'manifest.json') -Raw | ConvertFrom-Json
+    $VersionInfo = @{
+        updated_at = (Get-Date).ToString('o')
+        extension_version = $Manifest.version
+        app_dir = $AppDir
+    }
+    $VersionInfo | ConvertTo-Json | Set-Content -Path (Join-Path $InstallDir 'VERSION.json') -Encoding UTF8
+} catch {
+    # Non-fatal.
+}
+
 Remove-Item $TempZip -Force -ErrorAction SilentlyContinue
 Remove-Item $TempExtract -Recurse -Force -ErrorAction SilentlyContinue
 
-# Best-effort cleanup of older app-* folders. Any folder locked by a running browser
-# simply stays (harmless) and gets cleaned on a later run.
+# Best-effort cleanup of older app-* folders (skip the new one).
 Get-ChildItem -Path $InstallDir -Directory -Filter 'app-*' -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -ne $AppDir } |
     ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
@@ -111,46 +163,46 @@ foreach ($p in $EdgePaths) {
 
 $Desktop = [System.Environment]::GetFolderPath('Desktop')
 $WshShell = New-Object -ComObject WScript.Shell
-
-$Created = 0
+$Updated = 0
 
 if ($ChromePath) {
-    Write-Output "Creating Chrome shortcut..."
+    Write-Output "Updating Chrome shortcut..."
     $Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop 'Ephesoft Copilot (Chrome).lnk'))
     $Shortcut.TargetPath = $ChromePath
     $Shortcut.Arguments = $LaunchArgs
     $Shortcut.WorkingDirectory = $env:USERPROFILE
     $Shortcut.IconLocation = "$ChromePath,0"
     $Shortcut.Save()
-    $Created++
+    $Updated++
 }
 
 if ($EdgePath) {
-    Write-Output "Creating Edge shortcut..."
+    Write-Output "Updating Edge shortcut..."
     $Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop 'Ephesoft Copilot (Edge).lnk'))
     $Shortcut.TargetPath = $EdgePath
     $Shortcut.Arguments = $LaunchArgs
     $Shortcut.WorkingDirectory = $env:USERPROFILE
     $Shortcut.IconLocation = "$EdgePath,0"
     $Shortcut.Save()
-    $Created++
+    $Updated++
 }
 
 Write-Output ""
 Write-Output "=========================================="
-Write-Output "SUCCESS - Installed to:"
+Write-Output "SUCCESS - Updated to:"
 Write-Output $AppDir
 Write-Output ""
-Write-Output "IMPORTANT:"
-Write-Output "  Always use the desktop shortcut"
-Write-Output "  (dedicated browser profile)"
+Write-Output "Profile preserved at:"
+Write-Output $ProfileDir
+Write-Output "(license key + Gemini settings kept)"
 Write-Output ""
-
-if ($Created -eq 0) {
-    Write-Output "No browser found"
-    Write-Output "Load manually at chrome://extensions"
+Write-Output "Close any open Copilot browser windows,"
+Write-Output "then use the desktop shortcut to launch."
+Write-Output ""
+if ($Updated -eq 0) {
+    Write-Output "No browser found to refresh shortcuts."
+    Write-Output "Load manually: chrome://extensions"
 } else {
-    Write-Output "Double-click the desktop shortcut to start"
+    Write-Output "Desktop shortcuts now point at the new build."
 }
-
 Write-Output "=========================================="

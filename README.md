@@ -12,21 +12,25 @@ Dark glassmorphism side panel with tactile buttons and subtle floating backgroun
 ## Architecture
 
 ```
-Side Panel (Fill / Next / Stop)
+Side Panel (Fill Details / Fill Line Items / Next / Stop)
         │ port
         ▼
-Service Worker (observe → Gemini → act → repeat)
+Service Worker
+  Fill*: gather → decide (catalog→values in memory) → fill at once
+  Next:  observe → Gemini → act → repeat
         │ tabs.sendMessage + screenshot
         ▼
-Content Script (DOM fill/click/scroll + safety guard)
+Content Script (DOM inventory + fill/click/scroll + safety guard)
         │
         ▼
 Active Ephesoft tab (agent's real logged-in session)
 ```
 
-**RAG / SOP:** `extension/prompts/*.md` are injected as Gemini system instructions on every step.
+**RAG / SOP:** `extension/prompts/*.md` are injected as Gemini system instructions on every call.
 
-**Agent loop:** Observe page → ask Gemini for one action → execute → settle → repeat until `complete` / `incomplete` / step limit.
+**Fill Details / Fill Line Items:** Gather screenshots with few scrolls → map values onto a DOM field/table catalog into run-local memory → batch-fill and verify. Same fill capability as before; fewer per-field LLM calls.
+
+**Next:** Observe page → ask Gemini for one action → execute → settle → repeat until `complete` / `incomplete` / step limit.
 
 ---
 
@@ -47,6 +51,18 @@ Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing; & $file
 
 Creates desktop shortcuts that launch a **dedicated browser profile** with the extension preloaded. **Always use the shortcut** — the extension will not appear in your normal browser profile.
 
+### Update (existing installs)
+
+After a push to `main`, pilots can upgrade **without** a full reinstall (profile / license / Gemini key preserved):
+
+```powershell
+$url = 'https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/update.ps1'
+$file = "$env:TEMP\ephesoft-update.ps1"
+Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing; & $file
+```
+
+Or run the local copy: `%LOCALAPPDATA%\EphesoftCopilot\update.ps1` (shipped by install/update). Close Copilot browser windows, then use the desktop shortcut again.
+
 ### Option B — Load unpacked (developers)
 1. `chrome://extensions` → Developer mode → **Load unpacked** → select `extension/`
 2. Pin the toolbar icon and open the side panel
@@ -56,7 +72,7 @@ Creates desktop shortcuts that launch a **dedicated browser profile** with the e
 npm install
 node scripts/package_extension.js
 ```
-Produces `dist/ephesoft-copilot-extension-v2.0.0.zip` (obfuscated). Unzip → Load unpacked, or deploy via GPO (see `DEPLOYMENT.md`).
+Produces `dist/ephesoft-copilot-extension-v2.1.0.zip` (obfuscated). Unzip → Load unpacked, or deploy via GPO (see `DEPLOYMENT.md`).
 
 ### First-run setup
 1. Open the side panel → **Settings**
@@ -88,25 +104,38 @@ Verification is 100% offline (ECDSA P-256, Web Crypto). No license server.
 
 ---
 
+## Tests
+
+```bash
+npm test
+```
+
+Unit + audit suite covering fill planning, catalog mapping, confidence gates, UI/mode wiring, and `update.ps1`.
+
+---
+
 ## Project layout
 
 ```
 extension/
 ├── manifest.json
-├── service_worker.js      # agent orchestrator
-├── content_script.js      # DOM + safety guard
+├── service_worker.js      # gather→decide→fill + Next agent
+├── content_script.js      # DOM inventory + safety guard
 ├── sidepanel.html|css|js  # UI
 ├── copilot-launcher.bat   # offline Windows launcher
 ├── managed_schema.json    # GPO policy schema
 ├── icons/                 # extension icons
 ├── lib/gemini.js          # Gemini REST client
+├── lib/fill_plan.js       # plan sanitize / normalize helpers
 └── lib/license.js         # offline license verifier
 scripts/
 ├── package_extension.js   # obfuscated zip builder
 ├── generate_license.js    # license key generator
 ├── generate_icons.js      # PNG icon generator
 └── install_helpers.ps1    # shared Windows installer helpers
+tests/                     # node:test unit + audit suite
 install.ps1                # 1-click web bootstrap installer
+update.ps1                 # in-place upgrade for existing installs
 DEPLOYMENT.md              # IT / GPO deployment guide
 QUADRANTECH_TESTING.md     # pilot testing guide (gitignored — share directly)
 ```

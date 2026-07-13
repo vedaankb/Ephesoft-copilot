@@ -1,8 +1,8 @@
 # Ephesoft Copilot - Chrome Extension (V2)
 
 A self-contained Chrome extension. No backend, no Electron, no Playwright. It reads the
-document on the active Ephesoft tab with Gemini Vision and fills the fields, one safe action
-at a time. The human always performs Validate.
+document on the active Ephesoft tab with Gemini Vision and fills the fields. The human
+always performs Validate.
 
 ## Install (dev / unpacked)
 
@@ -15,12 +15,13 @@ at a time. The human always performs Validate.
 
 ## How it works
 
-- **sidepanel.\*** - the UI (Fill / Next / Stop, activity feed, settings).
-- **service_worker.js** - the agent loop: capture screenshot + page text, ask Gemini for the
-  next action, execute it, repeat until complete/incomplete.
-- **content_script.js** - reads the page and performs fill/select/click/scroll with realistic
+- **sidepanel.\*** - the UI (**Fill Details** / **Fill Line Items** / Next / Stop, activity feed, settings).
+- **service_worker.js** - Fill modes: gather context → decide catalog→values into memory → fill at once.
+  Next mode: classic observe → one Gemini action → execute loop.
+- **content_script.js** - inventories fields/tables, performs fill/select/click/scroll with realistic
   events; enforces a runtime guard that blocks Validate/Skip/Merge/Split/Submit clicks.
 - **lib/gemini.js** - tiny REST client for the Gemini API (plain HTTPS).
+- **lib/fill_plan.js** - pure helpers for plan sanitization and value normalization.
 - **prompts/** - the SOP and document-type rules, injected into every Gemini call (RAG).
 
 ## Safety

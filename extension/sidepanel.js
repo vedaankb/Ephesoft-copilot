@@ -3,7 +3,8 @@
 import { verifyLicenseOffline } from './lib/license.js';
 
 const els = {
-    fill: document.getElementById('fillBtn'),
+    fillDetails: document.getElementById('fillDetailsBtn'),
+    fillLineItems: document.getElementById('fillLineItemsBtn'),
     next: document.getElementById('nextBtn'),
     stop: document.getElementById('stopBtn'),
     runDot: document.getElementById('runDot'),
@@ -89,7 +90,8 @@ function onMessage(msg) {
 function setRunning(running) {
     els.runDot.className = 'run-dot ' + (running ? 'running' : 'idle');
     els.runDot.title = running ? 'running' : 'idle';
-    els.fill.disabled = running;
+    els.fillDetails.disabled = running;
+    els.fillLineItems.disabled = running;
     els.next.disabled = running;
     els.stop.disabled = !running;
 }
@@ -154,7 +156,8 @@ function escapeHtml(s) {
 
 // ---------- buttons ----------
 
-els.fill.addEventListener('click', () => start('fill'));
+els.fillDetails.addEventListener('click', () => start('fill_details'));
+els.fillLineItems.addEventListener('click', () => start('fill_line_items'));
 els.next.addEventListener('click', () => start('next'));
 els.stop.addEventListener('click', () => send({ type: 'stop' }));
 els.clearFeed.addEventListener('click', () => { els.feed.innerHTML = ''; });

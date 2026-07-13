@@ -570,28 +570,307 @@
         };
     }
 
+    // --- field / table inventory (catalog for gather→decide→fill) ---
+
+    function slugifyLabel(text) {
+        return String(text || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '')
+            .slice(0, 48) || 'field';
+    }
+
+    function associatedLabel(el) {
+        if (!el) return '';
+        if (el.id) {
+            try {
+                const lab = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+                if (lab && lab.innerText) return lab.innerText.trim();
+            } catch (e) { /* ignore */ }
+        }
+        const wrapped = el.closest && el.closest('label');
+        if (wrapped && wrapped.innerText) {
+            return wrapped.innerText.replace(el.value || '', '').trim().slice(0, 120);
+        }
+        const prev = el.previousElementSibling;
+        if (prev && /label|span|div|td|th/i.test(prev.tagName) && prev.innerText) {
+            return prev.innerText.trim().slice(0, 120);
+        }
+        const parent = el.parentElement;
+        if (parent) {
+            const lab = parent.querySelector('label, .label, [class*="label"]');
+            if (lab && lab.innerText) return lab.innerText.trim().slice(0, 120);
+        }
+        return (
+            (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title')))
+            || el.name
+            || el.id
+            || ''
+        ).toString().trim().slice(0, 120);
+    }
+
+    function buildSelector(el) {
+        if (!el) return null;
+        if (el.id) {
+            try { return `#${CSS.escape(el.id)}`; } catch (e) { return `#${el.id}`; }
+        }
+        if (el.name) {
+            const tag = el.tagName.toLowerCase();
+            return `${tag}[name="${el.name}"]`;
+        }
+        if (el.getAttribute && el.getAttribute('aria-label')) {
+            const a = el.getAttribute('aria-label');
+            return `${el.tagName.toLowerCase()}[aria-label="${a}"]`;
+        }
+        return null;
+    }
+
+    function isVisible(el) {
+        if (!el || !el.getBoundingClientRect) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 && r.height < 1) return false;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === 'hidden' || style.display === 'none') return false;
+        return true;
+    }
+
+    function inventoryFields() {
+        const nodes = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable="true"]'));
+        const fields = [];
+        const seen = new Set();
+        let idx = 0;
+        const docTypeOptions = [];
+
+        for (const el of nodes) {
+            const type = ((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
+            if (type === 'hidden' || type === 'submit' || type === 'button' || type === 'checkbox' || type === 'radio' || type === 'file') {
+                continue;
+            }
+            if (el.disabled) continue;
+            const label = associatedLabel(el);
+            const selector = buildSelector(el);
+            if (!selector) continue;
+            if (seen.has(selector)) continue;
+            seen.add(selector);
+
+            const slug = slugifyLabel(label || el.name || el.id || `f${idx}`);
+            const field_id = `${slug}_${idx}`;
+            idx += 1;
+
+            const options = [];
+            if (el instanceof HTMLSelectElement) {
+                for (const opt of el.options) {
+                    options.push({ value: opt.value, text: (opt.text || '').trim() });
+                }
+                const labLower = label.toLowerCase();
+                if (/doc|document.?type|type/.test(labLower) || /doc.?type/i.test(el.name || '') || /doc.?type/i.test(el.id || '')) {
+                    docTypeOptions.push(...options);
+                }
+            }
+
+            fields.push({
+                field_id,
+                label,
+                tag: el.tagName.toLowerCase(),
+                type: type || (el instanceof HTMLSelectElement ? 'select' : (el.isContentEditable ? 'contenteditable' : 'text')),
+                name: el.name || '',
+                id: el.id || '',
+                selector,
+                options,
+                currentValue: ('value' in el) ? el.value : (el.textContent || ''),
+                visible: isVisible(el),
+            });
+        }
+
+        // Prefer unique doc-type options if we found a dedicated select; else leave empty.
+        const uniqueDoc = [];
+        const seenOpt = new Set();
+        for (const o of docTypeOptions) {
+            const k = `${o.value}|${o.text}`;
+            if (seenOpt.has(k)) continue;
+            seenOpt.add(k);
+            uniqueDoc.push(o);
+        }
+
+        return { fields, docTypeOptions: uniqueDoc };
+    }
+
+    function findControlByText(patterns) {
+        const candidates = Array.from(document.querySelectorAll(
+            'button, a, [role="button"], input[type="button"], span, div'
+        ));
+        for (const pat of patterns) {
+            const re = typeof pat === 'string' ? new RegExp(pat, 'i') : pat;
+            for (const el of candidates) {
+                if (bannedReason(el)) continue;
+                const t = visibleLabel(el) || elementLabel(el);
+                if (t && re.test(t) && isVisible(el)) {
+                    const selector = buildSelector(el)
+                        || (el.id ? `#${el.id}` : null);
+                    // Prefer a clickable ancestor if this node is a plain span.
+                    const target = resolveClickTarget(el);
+                    const sel = buildSelector(target) || selector;
+                    if (sel) return { label: (target.innerText || el.innerText || '').trim().slice(0, 80), selector: sel };
+                }
+            }
+        }
+        return null;
+    }
+
+    function inventoryTable() {
+        const controls = {
+            table_tab: findControlByText([/^tables?$/i, /table/i]),
+            add_row: findControlByText([/add\s*row/i, /^\+$/, /insert\s*row/i]),
+            clear: findControlByText([/^clear(\s*all)?$/i, /clear\s*table/i]),
+        };
+
+        // Prefer a table that looks like a line-item grid (has inputs in rows).
+        const tables = Array.from(document.querySelectorAll('table'));
+        let best = null;
+        let bestScore = -1;
+        for (const table of tables) {
+            const inputs = table.querySelectorAll('input, textarea, select');
+            const rows = table.querySelectorAll('tr');
+            const score = inputs.length * 10 + rows.length;
+            if (score > bestScore) {
+                bestScore = score;
+                best = table;
+            }
+        }
+
+        const columns = [];
+        let rowSelector = null;
+        let rowCount = 0;
+
+        if (best) {
+            const headerCells = best.querySelectorAll('thead th, thead td, tr:first-child th');
+            let ci = 0;
+            headerCells.forEach((th) => {
+                const label = (th.innerText || '').trim();
+                if (!label) return;
+                columns.push({
+                    column_id: `${slugifyLabel(label)}_${ci}`,
+                    label,
+                    index: ci,
+                });
+                ci += 1;
+            });
+            // If no headers, invent columns from first data row inputs.
+            if (!columns.length) {
+                const firstRow = best.querySelector('tbody tr, tr:nth-child(2), tr');
+                if (firstRow) {
+                    const inputs = Array.from(firstRow.querySelectorAll('input, textarea, select')).filter((el) => {
+                        const t = (el.getAttribute('type') || '').toLowerCase();
+                        return t !== 'hidden' && !el.disabled;
+                    });
+                    inputs.forEach((el, i) => {
+                        const label = associatedLabel(el) || `col_${i}`;
+                        columns.push({ column_id: `${slugifyLabel(label)}_${i}`, label, index: i });
+                    });
+                }
+            }
+
+            const dataRows = Array.from(best.querySelectorAll('tbody tr, tr')).filter((tr) => (
+                tr.querySelectorAll('input, textarea, select').length > 0
+            ));
+            rowCount = dataRows.length;
+            if (dataRows.length) {
+                const last = dataRows[dataRows.length - 1];
+                rowSelector = buildSelector(last)
+                    || (last.id ? `#${last.id}` : 'table tbody tr:last-child');
+            } else {
+                rowSelector = 'table tbody tr:last-child';
+            }
+        }
+
+        return { columns, controls, row_selector: rowSelector, row_count: rowCount };
+    }
+
+    function readField(fieldId, selector) {
+        let el = null;
+        if (selector) {
+            try { el = query(selector); } catch (e) { el = null; }
+        }
+        if (!el && fieldId) {
+            const inv = inventoryFields();
+            const hit = inv.fields.find((f) => f.field_id === fieldId);
+            if (hit && hit.selector) {
+                try { el = query(hit.selector); } catch (e) { el = null; }
+            }
+        }
+        if (!el) throw new Error(`Cannot read field: ${fieldId || selector}`);
+        const value = ('value' in el) ? el.value : (el.textContent || '');
+        return { field_id: fieldId || null, selector: selector || buildSelector(el), value };
+    }
+
+    function fillById(fieldId, value, selectorHint) {
+        const inv = inventoryFields();
+        const hit = inv.fields.find((f) => f.field_id === fieldId)
+            || inv.fields.find((f) => f.selector === selectorHint)
+            || inv.fields.find((f) => String(f.label || '').toLowerCase() === String(fieldId || '').toLowerCase());
+        const selector = (hit && hit.selector) || selectorHint;
+        if (!selector) throw new Error(`Unknown field_id: ${fieldId}`);
+        if (hit && (hit.tag === 'select' || hit.type === 'select')) {
+            return domSelect(selector, value);
+        }
+        return domFill(selector, value);
+    }
+
+    function waitForRow(prevCount, timeoutMs) {
+        const timeout = timeoutMs || 4000;
+        const started = Date.now();
+        return new Promise((resolve) => {
+            const tick = () => {
+                const inv = inventoryTable();
+                if (inv.row_count > (prevCount || 0)) {
+                    resolve({ ready: true, row_count: inv.row_count, row_selector: inv.row_selector });
+                    return;
+                }
+                if (Date.now() - started >= timeout) {
+                    resolve({ ready: false, row_count: inv.row_count, row_selector: inv.row_selector });
+                    return;
+                }
+                setTimeout(tick, 120);
+            };
+            tick();
+        });
+    }
+
     // --- message router ---
 
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (!msg || !msg.cmd) return;
+        const reply = (ok, result, error) => {
+            try {
+                if (ok) sendResponse({ ok: true, result });
+                else sendResponse({ ok: false, error: error || 'unknown' });
+            } catch (e) { /* channel closed */ }
+        };
         try {
-            let result;
             switch (msg.cmd) {
-                case 'ping': result = { pong: true }; break;
-                case 'observe': result = observe(); break;
-                case 'get_html': result = { html: cleanHtml(msg.maxLen) }; break;
-                case 'fill': result = domFill(msg.selector, msg.value); break;
-                case 'select': result = domSelect(msg.selector, msg.value); break;
-                case 'click': result = domClick(msg.selector); break;
-                case 'fill_row': result = domFillRow(msg.row_selector, msg.values || []); break;
-                case 'exists': result = domExists(msg.selector); break;
-                case 'scroll': result = domScroll(msg.selector, msg.direction); break;
-                case 'set_scroll_y': result = setScrollY(msg.y); break;
+                case 'ping': reply(true, { pong: true }); break;
+                case 'observe': reply(true, observe()); break;
+                case 'get_html': reply(true, { html: cleanHtml(msg.maxLen) }); break;
+                case 'fill': reply(true, domFill(msg.selector, msg.value)); break;
+                case 'select': reply(true, domSelect(msg.selector, msg.value)); break;
+                case 'click': reply(true, domClick(msg.selector)); break;
+                case 'fill_row': reply(true, domFillRow(msg.row_selector, msg.values || [])); break;
+                case 'exists': reply(true, domExists(msg.selector)); break;
+                case 'scroll': reply(true, domScroll(msg.selector, msg.direction)); break;
+                case 'set_scroll_y': reply(true, setScrollY(msg.y)); break;
+                case 'inventory_fields': reply(true, inventoryFields()); break;
+                case 'inventory_table': reply(true, inventoryTable()); break;
+                case 'read_field': reply(true, readField(msg.field_id, msg.selector)); break;
+                case 'fill_by_id': reply(true, fillById(msg.field_id, msg.value, msg.selector)); break;
+                case 'wait_for_row':
+                    waitForRow(msg.prev_count, msg.timeout_ms)
+                        .then((result) => reply(true, result))
+                        .catch((e) => reply(false, null, e && e.message ? e.message : String(e)));
+                    return true;
                 default: throw new Error(`Unknown cmd: ${msg.cmd}`);
             }
-            sendResponse({ ok: true, result });
         } catch (e) {
-            sendResponse({ ok: false, error: e && e.message ? e.message : String(e) });
+            reply(false, null, e && e.message ? e.message : String(e));
         }
         return true; // keep the message channel open for async sendResponse
     });
