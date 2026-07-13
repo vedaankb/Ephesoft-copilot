@@ -334,13 +334,16 @@ export function valuesRoughlyEqual(expected, actual) {
 
 export function buildGatherPrompt(mode, observation, history) {
     const scope = mode === 'fill_line_items'
-        ? 'LINE ITEMS only (table columns and document line charges). Do NOT fill yet.'
-        : 'HEADER / DETAILS fields only (doc type, names, amounts, dates). Do NOT fill yet. Do NOT open the line-item table unless needed to see labels.';
+        ? 'LINE ITEMS only. The HUMAN already opened the Table view. Scroll the document and/or table if needed. Do NOT click Table tab. Do NOT fill yet.'
+        : 'HEADER / DETAILS fields only (doc type, names, amounts, dates). Do NOT fill yet. Do NOT open the line-item Table view - Fill Details stops after header fields.';
     const hist = history.length ? history.map((h, i) => `${i + 1}. ${h}`).join('\n') : '(none)';
+    const allowed = mode === 'fill_line_items'
+        ? 'You may ONLY: scroll, or click document-viewer next/previous page. Never click Table / Add Row / Clear during gather.'
+        : 'You may ONLY: scroll, or click document-viewer next/previous page. Never open Table or fill fields during gather.';
     return [
         `PHASE: GATHER for ${modeLabel(mode)}. ${scope}`,
-        'You may ONLY: scroll, click document-viewer page controls, or click the Table tab to reveal the line-item area.',
-        'When you have enough screenshots/context of the document AND the form labels, respond with {"action":"done_gathering","reason":"..."}.',
+        allowed,
+        'When you have enough screenshots/context, respond with {"action":"done_gathering","reason":"..."}.',
         'If the SOP requires stopping, respond with {"action":"incomplete","reason":"<SOP reason>","note":"..."}.',
         'Do NOT fill, select, or add rows during gather.',
         '',
@@ -429,3 +432,318 @@ export function slugify(text) {
         .replace(/^_|_$/g, '')
         .slice(0, 48) || 'field';
 }
+
+/** Human opens Table view before Fill Line Items — agent must not click Table tab. */
+export function agentOpensTableTab() {
+    return false;
+}
+
+/** True if a gather/click looks like navigating to the Table tab (blocked). */
+export function isTableTabClick(action) {
+    if (!action || action.action !== 'click') return false;
+    const sel = String(action.selector || '').toLowerCase();
+    const note = String(action.note || action.reason || '').toLowerCase();
+    const blob = `${sel} ${note}`;
+    // Match Table tab / tableTab / #table controls, but not "tablet" etc.
+    if (/\btable\s*tab\b/.test(blob)) return true;
+    if (/#table\b/.test(sel) || /#tabletab\b/.test(sel) || /\[.*table.*\]/.test(sel)) return true;
+    if (/\btable\b/.test(note) && /open|click|switch|view|tab/.test(note)) return true;
+    if (/\btable\b/.test(sel) && !/vtable|tablet|stable/.test(sel)) return true;
+    return false;
+}
+
+/** True if gather click is a safe doc-viewer page control. */
+export function isAllowedGatherClick(action, mode) {
+    if (!action || action.action !== 'click') return false;
+    if (isTableTabClick(action)) return false;
+    const blob = `${action.selector || ''} ${action.note || ''} ${action.reason || ''}`.toLowerCase();
+    // Block mutate controls during gather.
+    if (/add\s*row|clear|validate|submit|skip|merge|split/.test(blob)) return false;
+    // Allow document viewer pagination / zoom-ish language.
+    if (/page|next|prev|previous|viewer|zoom|document/.test(blob)) return true;
+    // For fill modes, reject unknown clicks during gather (prefer scroll / done_gathering).
+    if (mode === 'fill_details' || mode === 'fill_line_items') return false;
+    return true;
+}
+
+/** Pick the catalog select used for document type. */
+export function findDocTypeField(catalog) {
+    const fields = (catalog && catalog.fields) || [];
+    const byLabel = fields.find((f) => {
+        const lab = String(f.label || '').toLowerCase();
+        return f.tag === 'select' && (/doc|document.?type|^type$/.test(lab) || /doc.?type/i.test(f.name || '') || /doc.?type/i.test(f.id || ''));
+    });
+    if (byLabel) return byLabel;
+    return fields.find((f) => f.tag === 'select' && (f.options || []).length > 2) || null;
+}
+
+/**
+ * Build the deterministic DOM command sequence for Fill Details.
+ * Does not include Table / line-item actions — mode stops after header fill.
+ */
+export function buildDetailsActions(plan, catalog) {
+    const actions = [];
+    if (!plan || plan.kind !== 'fill_details') return actions;
+    const docField = findDocTypeField(catalog);
+    if (plan.doc_type && docField && docField.selector) {
+        actions.push({
+            cmd: 'select',
+            selector: docField.selector,
+            value: plan.doc_type,
+            field_id: docField.field_id,
+            purpose: 'doc_type',
+        });
+    }
+    const pre = preflightDetails(plan, catalog);
+    for (const field of pre.ready.length ? pre.ready : (plan.fields || [])) {
+        actions.push({
+            cmd: 'fill_by_id',
+            field_id: field.field_id,
+            selector: field.selector,
+            value: field.value,
+            purpose: 'header_field',
+        });
+    }
+    return actions;
+}
+
+/**
+ * Build the deterministic DOM command sequence for Fill Line Items.
+ * Assumes the human already opened Table view — never emits a table_tab click.
+ */
+export function buildLineItemActions(plan, catalog) {
+    const actions = [];
+    if (!plan || plan.kind !== 'fill_line_items') return actions;
+    const controls = (catalog && catalog.controls) || {};
+    if (plan.clear_first && controls.clear && controls.clear.selector) {
+        actions.push({ cmd: 'click', selector: controls.clear.selector, purpose: 'clear_table' });
+    }
+    const addSelector = controls.add_row && controls.add_row.selector;
+    const rowSelector = (catalog && catalog.row_selector) || 'table tbody tr:last-child';
+    for (let i = 0; i < (plan.rows || []).length; i += 1) {
+        const row = plan.rows[i];
+        if (addSelector) {
+            actions.push({ cmd: 'click', selector: addSelector, purpose: 'add_row', row_index: i });
+        }
+        actions.push({
+            cmd: 'fill_row',
+            row_selector: rowSelector,
+            values: row.values,
+            purpose: 'fill_row',
+            row_index: i,
+        });
+    }
+    return actions;
+}
+
+/**
+ * Simulate executing detail/line-item actions against an in-memory fake page.
+ * Used by unit tests to validate fill/navigate sequencing without Chrome.
+ */
+export function simulateFillRun(mode, plan, pageState) {
+    const state = {
+        fields: { ...(pageState.fields || {}) },
+        rows: [...(pageState.rows || [])],
+        view: pageState.view || (mode === 'fill_line_items' ? 'table' : 'details'),
+        log: [],
+        errors: [],
+    };
+    const catalog = pageState.catalog;
+    const actions = mode === 'fill_line_items'
+        ? buildLineItemActions(plan, catalog)
+        : buildDetailsActions(plan, catalog);
+
+    for (const action of actions) {
+        if (action.purpose === 'table_tab' || (action.cmd === 'click' && isTableTabClick(action))) {
+            state.errors.push('blocked_table_tab_click');
+            continue;
+        }
+        if (action.cmd === 'select' || action.cmd === 'fill_by_id' || action.cmd === 'fill') {
+            const key = action.field_id || action.selector;
+            if (mode === 'fill_details' && state.view === 'table') {
+                state.errors.push('details_fill_while_on_table');
+            }
+            state.fields[key] = action.value;
+            state.log.push(action);
+        } else if (action.cmd === 'click' && action.purpose === 'clear_table') {
+            state.rows = [];
+            state.log.push(action);
+        } else if (action.cmd === 'click' && action.purpose === 'add_row') {
+            if (state.view !== 'table') {
+                state.errors.push('add_row_without_table_view');
+            }
+            state.rows.push({ values: [] });
+            state.log.push(action);
+        } else if (action.cmd === 'fill_row') {
+            if (!state.rows.length) {
+                state.errors.push(`fill_row_without_row:${action.row_index}`);
+                continue;
+            }
+            state.rows[state.rows.length - 1] = { values: [...(action.values || [])] };
+            state.log.push(action);
+        } else {
+            state.log.push(action);
+        }
+    }
+    state.ok = state.errors.length === 0;
+    return state;
+}
+
+/** NEXT-mode: pick oldest unassigned, not-in-progress batch from a list. */
+export function pickNextBatch(batches) {
+    if (!Array.isArray(batches) || !batches.length) return null;
+    const eligible = batches.filter((b) => {
+        if (!b) return false;
+        const status = String(b.status || '').toLowerCase();
+        const assignee = String(b.assigned_to || b.assignee || '').trim();
+        if (assignee) return false;
+        if (/in\s*progress|locked|working/.test(status)) return false;
+        return true;
+    });
+    if (!eligible.length) return null;
+    eligible.sort((a, b) => {
+        const da = Date.parse(a.created || a.received || a.date || 0) || 0;
+        const db = Date.parse(b.created || b.received || b.date || 0) || 0;
+        if (da !== db) return da - db;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+    return eligible[0];
+}
+
+// ---------- page gate (no LLM) ----------
+
+export const PAGE_KINDS = Object.freeze(['batch_list', 'details', 'table', 'unknown']);
+
+/** Which page each mode expects. */
+export function requiredPageForMode(mode) {
+    if (mode === 'next') return 'batch_list';
+    if (mode === 'fill_line_items') return 'table';
+    if (mode === 'fill_details' || mode === 'fill') return 'details';
+    return null;
+}
+
+/**
+ * Classify the current Ephesoft surface from cheap DOM signals (no LLM).
+ * Biased toward `unknown` when unsure so we do NOT false-block a correct page.
+ */
+export function detectPageKind(signals = {}) {
+    const text = String(signals.text_sample || signals.text || '').toLowerCase();
+    const url = String(signals.url || '').toLowerCase();
+    const title = String(signals.title || '').toLowerCase();
+    const fieldCount = Number(signals.field_count) || 0;
+    const selectCount = Number(signals.select_count) || 0;
+    const cols = Number(signals.table_column_count) || 0;
+    const rows = Number(signals.table_row_count) || 0;
+    const hasAdd = !!signals.has_add_row;
+    const hasClear = !!signals.has_clear;
+    const hasDocType = !!signals.has_doc_type_select;
+    const batchHint = !!signals.batch_list_hints
+        || /\bbatch(es)?\b/.test(text)
+        || /\bassigned\b/.test(text)
+        || /batch.?list|work.?queue|inbox/.test(url + ' ' + title);
+
+    let table = 0;
+    let details = 0;
+    let batchList = 0;
+
+    if (hasAdd) table += 4;
+    if (hasClear) table += 1;
+    if (cols >= 2) table += 2;
+    if (cols >= 1 && rows >= 0 && hasAdd) table += 1;
+    if (signals.has_line_item_inputs) table += 2;
+
+    if (hasDocType) details += 3;
+    if (fieldCount >= 3) details += 2;
+    if (fieldCount >= 5) details += 1;
+    if (selectCount >= 1 && fieldCount >= 2) details += 1;
+    // Header form usually has more standalone fields than a bare table page.
+    if (fieldCount >= 3 && !hasAdd) details += 1;
+
+    if (batchHint && fieldCount <= 2 && !hasAdd && !hasDocType) batchList += 3;
+    if (batchHint && fieldCount === 0) batchList += 2;
+    if (/\b(ready|unassigned|received|created)\b/.test(text) && fieldCount <= 1 && !hasAdd) {
+        batchList += 2;
+    }
+    if (signals.batch_row_count >= 3) batchList += 3;
+
+    const scores = { table, details, batch_list: batchList };
+    const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+    const [bestKind, bestScore] = ranked[0];
+    const secondScore = ranked[1][1];
+
+    // Need a clear winner — otherwise unknown (allow run; avoid false blocks).
+    if (bestScore < 3) return { kind: 'unknown', confidence: 'low', scores };
+    if (bestScore - secondScore < 2 && bestScore < 5) {
+        return { kind: 'unknown', confidence: 'low', scores };
+    }
+    return {
+        kind: bestKind,
+        confidence: bestScore >= 5 ? 'high' : 'medium',
+        scores,
+    };
+}
+
+/**
+ * Decide whether to block before LLM.
+ * - override → never block
+ * - unknown / matching required → allow
+ * - confident mismatch → block
+ */
+export function evaluatePageGate(mode, detection, opts = {}) {
+    const required = requiredPageForMode(mode);
+    const override = !!opts.overridePageGate;
+    const kind = (detection && detection.kind) || 'unknown';
+    const confidence = (detection && detection.confidence) || 'low';
+
+    if (!required) {
+        return { allow: true, blocked: false, required, kind, reason: 'no_requirement' };
+    }
+    if (override) {
+        return {
+            allow: true,
+            blocked: false,
+            required,
+            kind,
+            overridden: true,
+            reason: 'user_override',
+        };
+    }
+    if (kind === 'unknown') {
+        return { allow: true, blocked: false, required, kind, reason: 'unknown_allow' };
+    }
+    if (kind === required) {
+        return { allow: true, blocked: false, required, kind, reason: 'match' };
+    }
+    // Only hard-block when detection is at least medium confidence.
+    if (confidence === 'low') {
+        return { allow: true, blocked: false, required, kind, reason: 'low_confidence_allow' };
+    }
+    return {
+        allow: false,
+        blocked: true,
+        required,
+        kind,
+        reason: 'mismatch',
+        message: pageGateMessage(mode, kind),
+    };
+}
+
+export function pageGateMessage(mode, detectedKind) {
+    const required = requiredPageForMode(mode);
+    const detected = detectedKind || 'unknown';
+    if (mode === 'next') {
+        return `Wrong page for Next (detected: ${detected}). Open the Ephesoft batch list first, then try again — or Run anyway if this is a false alarm.`;
+    }
+    if (mode === 'fill_line_items') {
+        return `Wrong page for Fill Line Items (detected: ${detected}). Open the Table view yourself first, then try again — or Run anyway if this is a false alarm.`;
+    }
+    return `Wrong page for Fill Details (detected: ${detected}). Open a batch document on the header/details fields (not the batch list or Table view), then try again — or Run anyway if this is a false alarm.`;
+}
+
+export function pageKindLabel(kind) {
+    if (kind === 'batch_list') return 'batch list';
+    if (kind === 'details') return 'details / header fields';
+    if (kind === 'table') return 'line-item Table view';
+    return 'unknown page';
+}
+

@@ -33,6 +33,7 @@ describe('content_script command surface', () => {
         'inventory_table',
         'read_field',
         'fill_by_id',
+        'page_signals',
         'wait_for_row',
     ];
     for (const cmd of required) {
@@ -61,6 +62,39 @@ describe('sidepanel activity wiring', () => {
         assert.match(js, /start\('fill_line_items'\)/);
         assert.match(js, /start\('next'\)/);
     });
+    it('supports page gate override start', () => {
+        assert.match(js, /overridePageGate:\s*true/);
+        assert.match(js, /page_gate_blocked/);
+        assert.match(js, /page_blocked/);
+    });
+});
+
+describe('service worker page gate before LLM', () => {
+    const sw = fs.readFileSync(path.join(root, 'extension/service_worker.js'), 'utf8');
+    it('calls assertPageGate in fill and next paths', () => {
+        const matches = sw.match(/assertPageGate\(/g) || [];
+        assert.ok(matches.length >= 2, `expected >=2 assertPageGate calls, got ${matches.length}`);
+    });
+    it('posts page_gate_blocked without calling Gemini first conceptually', () => {
+        assert.match(sw, /page_gate_blocked/);
+        assert.match(sw, /page_signals/);
+        // Gate helper is defined before gather/agent loops use think()
+        const gateIdx = sw.indexOf('async function assertPageGate');
+        const gatherIdx = sw.indexOf('async function runGatherDecideFill');
+        assert.ok(gateIdx > 0 && gatherIdx > gateIdx);
+    });
+});
+
+describe('update.ps1 and install encoding', () => {
+    for (const file of ['update.ps1', 'install.ps1']) {
+        it(`${file} has no Write-Host and is ASCII`, () => {
+            const t = fs.readFileSync(path.join(root, file), 'utf8');
+            assert.doesNotMatch(t, /Write-Host/);
+            for (let i = 0; i < t.length; i += 1) {
+                assert.ok(t.charCodeAt(i) < 128, `${file} non-ascii at ${i}`);
+            }
+        });
+    }
 });
 
 describe('README documents new UX', () => {
@@ -150,8 +184,19 @@ describe('update.ps1 syntax smoke', () => {
     it('exits when no install', () => assert.match(t, /No existing install/));
     it('copies extension into app dir', () => assert.match(t, /Copy-Item/));
     it('does not wipe profile directory contents intentionally', () => {
-        // ProfileDir is created but never Remove-Item'd as a wipe of user data.
         assert.doesNotMatch(t, /Remove-Item.*ProfileDir/);
+    });
+    it('never uses Write-Host (encoding-safe Write-Output only)', () => {
+        assert.doesNotMatch(t, /Write-Host/);
+        assert.match(t, /Write-Output/);
+    });
+    it('is ASCII-only (no encoding-sensitive glyphs)', () => {
+        for (let i = 0; i < t.length; i += 1) {
+            assert.ok(t.charCodeAt(i) < 128, `non-ascii at ${i}: ${t.charCodeAt(i)}`);
+        }
+    });
+    it('does not use UTF8 Set-Content', () => {
+        assert.doesNotMatch(t, /Set-Content[^\n]*Encoding\s+UTF8/i);
     });
 });
 

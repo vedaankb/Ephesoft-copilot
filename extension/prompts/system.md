@@ -113,18 +113,21 @@ Use ONLY `field_id` values from the catalog provided in the decide prompt. Omit 
 ## Working method for FILL DETAILS
 
 1. GATHER: read screenshots + page text. Scroll the document viewer and fields panel as
-   needed. Do NOT fill. Call `done_gathering` when you can map header fields.
+   needed. Do NOT fill. Do NOT open the Table view. Call `done_gathering` when you can map
+   header fields.
 2. DECIDE (extension asks): return doc_type + fields keyed by catalog `field_id` with values
    and confidence. Skip line items entirely.
-3. The extension fills all mapped fields at once and verifies. You do not drive per-field fills.
+3. The extension fills all mapped header fields at once, verifies, and STOPS. Line items are
+   a separate human-started Fill Line Items run after the person opens Table themselves.
 
 ## Working method for FILL LINE ITEMS
 
-1. GATHER: scroll the document to see all billable lines. Click the Table tab if needed to
-   reveal the line-item UI. Do NOT Add Row or fill cells during gather. Call `done_gathering`.
-2. DECIDE: return ordered `rows` aligned to catalog columns; set `clear_first` if stale rows
+1. Prerequisite: the HUMAN has already clicked the Table tab/view. Do not click Table yourself.
+2. GATHER: scroll the document (and table if needed) to see all billable lines. Do NOT Add Row
+   or fill cells during gather. Call `done_gathering`.
+3. DECIDE: return ordered `rows` aligned to catalog columns; set `clear_first` if stale rows
    exist. Follow SOP include/exclude rules. Omit uncertain rows.
-3. The extension opens Table, clears if requested, Add Row + fill_row for each planned row.
+4. The extension clears if requested, then Add Row + fill_row for each planned row, and STOPS.
 
 ### Line items SOP reminders
 

@@ -28,7 +28,9 @@ Active Ephesoft tab (agent's real logged-in session)
 
 **RAG / SOP:** `extension/prompts/*.md` are injected as Gemini system instructions on every call.
 
-**Fill Details / Fill Line Items:** Gather screenshots with few scrolls → map values onto a DOM field/table catalog into run-local memory → batch-fill and verify. Same fill capability as before; fewer per-field LLM calls.
+**Fill Details / Fill Line Items:** Gather screenshots with few scrolls → map values onto a DOM field/table catalog into run-local memory → batch-fill and verify, then **stop**. Same fill capability as before; fewer per-field LLM calls. **Fill Details** never opens Table. For **Fill Line Items**, the human opens the Table view first, then runs the button.
+
+**Page gate:** Before any Gemini call, a cheap DOM check confirms the right surface (batch list / details / Table). Wrong page → no LLM spend; Activity shows **Run anyway** to override false detections.
 
 **Next:** Observe page → ask Gemini for one action → execute → settle → repeat until `complete` / `incomplete` / step limit.
 

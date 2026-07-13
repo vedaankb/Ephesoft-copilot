@@ -488,6 +488,22 @@ main::-webkit-scrollbar-thumb:hover {
     color: #ddd6fe;
 }
 
+.feed-override {
+    margin-left: 6px;
+    font-weight: 700;
+    color: var(--amber);
+    text-transform: none;
+    font-size: 11px;
+}
+
+.feed-override:hover:not(:disabled) {
+    color: #fde68a;
+}
+
+.page-gate-actions {
+    margin-top: 10px;
+}
+
 .link {
     background: none;
     border: none;

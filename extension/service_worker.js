@@ -14,9 +14,15 @@ import {
     MAX_GATHER_STEPS,
     MAX_RECOVERY_CALLS,
     buildDecidePrompt,
+    buildDetailsActions,
     buildGatherPrompt,
+    buildLineItemActions,
+    detectPageKind,
+    evaluatePageGate,
+    isAllowedGatherClick,
+    isTableTabClick,
     modeLabel,
-    preflightDetails,
+    pageKindLabel,
     sanitizeDetailsPlan,
     sanitizeLineItemsPlan,
     summarizeContextBuffer,
@@ -57,7 +63,9 @@ chrome.runtime.onConnect.addListener((port) => {
         if (!msg || !msg.type) return;
         if (msg.type === 'start') {
             if (running) { status('A run is already in progress.', 'warn'); return; }
-            startRun(msg.mode || 'fill', msg.tabId);
+            startRun(msg.mode || 'fill', msg.tabId, {
+                overridePageGate: !!msg.overridePageGate,
+            });
         } else if (msg.type === 'stop') {
             abortRequested = true;
             if (runController) { try { runController.abort(); } catch (e) { /* noop */ } }
@@ -308,7 +316,7 @@ async function think({ apiKey, model, systemInstruction, userText, imageB64, sig
 
 // ---------- the agent loop ----------
 
-async function startRun(mode, preferredTabId) {
+async function startRun(mode, preferredTabId, opts = {}) {
     running = true;
     abortRequested = false;
     runController = new AbortController();
@@ -318,9 +326,9 @@ async function startRun(mode, preferredTabId) {
         if (mode === 'fill_details' || mode === 'fill_line_items' || mode === 'fill') {
             // Legacy 'fill' maps to details-only (line items are a separate button).
             const fillMode = mode === 'fill' ? 'fill_details' : mode;
-            await runGatherDecideFill(fillMode, preferredTabId);
+            await runGatherDecideFill(fillMode, preferredTabId, opts);
         } else {
-            await runAgent(mode, preferredTabId);
+            await runAgent(mode, preferredTabId, opts);
         }
     } catch (e) {
         // A user Stop (or panel close) aborts the in-flight fetch; treat as graceful stop.
@@ -339,15 +347,58 @@ async function startRun(mode, preferredTabId) {
     }
 }
 
+/**
+ * Cheap DOM page check before any Gemini call.
+ * Returns false if the run should stop (blocked); true to continue.
+ */
+async function assertPageGate(mode, tabId, opts = {}) {
+    const sigResp = await sendToTab(tabId, { cmd: 'page_signals' });
+    if (!sigResp || !sigResp.ok) {
+        // If we cannot read the page, do not invent a block — existing errors will surface.
+        status('Page check skipped (could not read page signals).', 'warn');
+        return true;
+    }
+    const detection = detectPageKind(sigResp.result || {});
+    const gate = evaluatePageGate(mode, detection, opts);
+    status(
+        `Page check: ${pageKindLabel(detection.kind)} (${detection.confidence || 'low'})`
+        + (gate.overridden ? ' - override enabled' : ''),
+        gate.overridden ? 'warn' : 'info'
+    );
+    if (!gate.blocked) return true;
+
+    const message = gate.message
+        || `Wrong page for ${modeLabel(mode)} (detected ${detection.kind}).`;
+    status(message, 'warn');
+    post({
+        type: 'page_gate_blocked',
+        mode,
+        required: gate.required,
+        detected: detection.kind,
+        confidence: detection.confidence,
+        scores: detection.scores,
+        message,
+    });
+    post({
+        type: 'done',
+        outcome: 'page_blocked',
+        mode,
+        required: gate.required,
+        detected: detection.kind,
+        message,
+    });
+    return false;
+}
+
 function taskHeader(mode) {
     if (mode === 'next') {
         return 'TASK MODE: NEXT. Open the oldest unassigned, not-in-progress batch from the batch list. '
             + 'Use click for batch rows and for batch-list pagination. When the batch has opened, call complete.';
     }
     if (mode === 'fill_line_items') {
-        return 'TASK MODE: FILL LINE ITEMS. Gather context, decide row values into memory, then fill the table.';
+        return 'TASK MODE: FILL LINE ITEMS. Human already opened Table view. Gather context, decide row values into memory, fill the table, then stop.';
     }
-    return 'TASK MODE: FILL DETAILS. Gather context, decide header field values into memory, then fill details only (no line items).';
+    return 'TASK MODE: FILL DETAILS. Gather context, decide header field values into memory, fill details only, then stop. Do not open Table or fill line items.';
 }
 
 function buildUserText(mode, o, history) {
@@ -400,7 +451,7 @@ async function executeAction(tabId, action) {
     }
 }
 
-async function runAgent(mode, preferredTabId) {
+async function runAgent(mode, preferredTabId, opts = {}) {
     // 1. Double-check license offline in service worker
     const { licenseKey } = await chrome.storage.local.get(['licenseKey']);
     if (!licenseKey) {
@@ -416,6 +467,8 @@ async function runAgent(mode, preferredTabId) {
 
     status(`Connecting to page: ${tab.title || tab.url}`);
     await ensureContentScript(tab.id);
+
+    if (!(await assertPageGate(mode, tab.id, opts))) return;
 
     const history = [];
     const maxSteps = mode === 'fill' ? 80 : 30;
@@ -545,7 +598,7 @@ async function runAgent(mode, preferredTabId) {
 
 // ---------- gather → decide (memory) → fill at once ----------
 
-async function runGatherDecideFill(mode, preferredTabId) {
+async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
     const { licenseKey } = await chrome.storage.local.get(['licenseKey']);
     if (!licenseKey) throw new Error('No License Key provided. Enter your license key in Settings.');
     await verifyLicenseOffline(licenseKey);
@@ -557,6 +610,8 @@ async function runGatherDecideFill(mode, preferredTabId) {
     const tab = await getTargetTab(preferredTabId);
     status(`Connecting to page: ${tab.title || tab.url}`);
     await ensureContentScript(tab.id);
+
+    if (!(await assertPageGate(mode, tab.id, opts))) return;
 
     const signal = runController ? runController.signal : undefined;
     const memory = { mode, context: [], catalog: null, plan: null, skipped: [], errors: [] };
@@ -630,34 +685,42 @@ async function runGatherDecideFill(mode, preferredTabId) {
             break;
         }
 
-        if (action.action === 'scroll' || action.action === 'click') {
-            // Block fills during gather even if the model misbehaves.
+        if (action.action === 'scroll') {
             const res = await executeAction(tab.id, action);
             const line = summarizeStep(action, res);
             gatherHistory.push(line);
             status(line, res && res.ok ? 'info' : 'warn');
-            await sleep(action.action === 'click' ? 1400 : 500);
+            await sleep(500);
+            continue;
+        }
+
+        if (action.action === 'click') {
+            if (isTableTabClick(action) || !isAllowedGatherClick(action, mode)) {
+                status('Skipping disallowed gather click (human opens Table; gather is read-only aside from doc page turns).', 'warn');
+                gatherHistory.push(`blocked click ${action.selector || ''}`);
+                continue;
+            }
+            const res = await executeAction(tab.id, action);
+            const line = summarizeStep(action, res);
+            gatherHistory.push(line);
+            status(line, res && res.ok ? 'info' : 'warn');
+            await sleep(1400);
             continue;
         }
 
         // Unknown gather action — treat as done_gathering to move forward.
-        status(`Unrecognized gather action "${action.action}" — proceeding to decide.`, 'warn');
+        status(`Unrecognized gather action "${action.action}" - proceeding to decide.`, 'warn');
         break;
     }
 
     // --- Inventory catalog ---
     status('Inventorying form fields / table...', 'think');
     if (mode === 'fill_line_items') {
-        // Ensure Table view is open if we can find the control.
-        const tableInv0 = await sendToTab(tab.id, { cmd: 'inventory_table' });
-        if (tableInv0 && tableInv0.ok && tableInv0.result?.controls?.table_tab?.selector) {
-            status('Opening Table view...', 'info');
-            await sendToTab(tab.id, { cmd: 'click', selector: tableInv0.result.controls.table_tab.selector });
-            await sleep(1400);
-        }
+        // Human already navigated to Table view — inventory what is on screen.
         const tableInv = await sendToTab(tab.id, { cmd: 'inventory_table' });
         if (!tableInv || !tableInv.ok) throw new Error(`Could not inventory table: ${tableInv && tableInv.error}`);
         memory.catalog = tableInv.result;
+        status(`Catalogued ${(memory.catalog.columns || []).length} columns, ${memory.catalog.row_count || 0} existing row(s).`, 'info');
     } else {
         const fieldsInv = await sendToTab(tab.id, { cmd: 'inventory_fields' });
         if (!fieldsInv || !fieldsInv.ok) throw new Error(`Could not inventory fields: ${fieldsInv && fieldsInv.error}`);
@@ -751,9 +814,9 @@ async function runGatherDecideFill(mode, preferredTabId) {
 async function executeDetailsFromMemory(tabId, memory, llm) {
     const plan = memory.plan;
     const catalog = memory.catalog;
-    const pre = preflightDetails(plan, catalog);
-    if (!pre.ok && pre.missing.length) {
-        status(`Preflight: missing targets for ${pre.missing.join(', ')} — filling what we can.`, 'warn');
+    const actions = buildDetailsActions(plan, catalog);
+    if (!actions.length) {
+        status('No detail fields to fill from plan.', 'warn');
     }
 
     let filled = 0;
@@ -761,62 +824,37 @@ async function executeDetailsFromMemory(tabId, memory, llm) {
     const failures = [];
     let recoveryLeft = MAX_RECOVERY_CALLS;
 
-    // Doc type first if present.
-    if (plan.doc_type) {
-        const docField = (catalog.fields || []).find((f) => {
-            const lab = String(f.label || '').toLowerCase();
-            return f.tag === 'select' && (/doc|document.?type|type/.test(lab) || /doc.?type/i.test(f.name || '') || /doc.?type/i.test(f.id || ''));
-        }) || (catalog.fields || []).find((f) => f.tag === 'select' && (f.options || []).length > 2);
-
-        if (docField && docField.selector) {
-            status(`Setting document type: ${plan.doc_type}`, 'info');
-            const res = await sendToTab(tabId, { cmd: 'select', selector: docField.selector, value: plan.doc_type });
-            if (res && res.ok) filled += 1;
-            else {
-                failed += 1;
-                failures.push(`doc_type: ${res && res.error}`);
-            }
-            await sleep(400);
-        }
-    }
-
-    for (const field of pre.ready.length ? pre.ready : (plan.fields || [])) {
+    for (const action of actions) {
         if (abortRequested) {
             post({ type: 'done', outcome: 'stopped' });
             return;
         }
-        const selector = field.selector;
-        const value = field.value;
-        status(`Fill ${field.label || field.field_id} = ${value}`, 'info');
 
         let res;
-        if (field.field_id) {
+        if (action.cmd === 'select') {
+            status(`Setting document type: ${action.value}`, 'info');
+            res = await sendToTab(tabId, { cmd: 'select', selector: action.selector, value: action.value });
+        } else {
+            status(`Fill ${action.field_id} = ${action.value}`, 'info');
             res = await sendToTab(tabId, {
                 cmd: 'fill_by_id',
-                field_id: field.field_id,
-                value,
-                selector,
+                field_id: action.field_id,
+                value: action.value,
+                selector: action.selector,
             });
-        } else if (selector) {
-            res = await sendToTab(tabId, { cmd: 'fill', selector, value });
-        } else {
-            failed += 1;
-            failures.push(`${field.field_id}: no selector`);
-            continue;
         }
 
         if (!res || !res.ok) {
-            if (recoveryLeft > 0) {
+            if (recoveryLeft > 0 && action.cmd !== 'select') {
                 recoveryLeft -= 1;
-                status(`Recovery for ${field.field_id}: ${res && res.error}`, 'warn');
-                // Re-inventory and retry once by label.
+                status(`Recovery for ${action.field_id}: ${res && res.error}`, 'warn');
                 const inv = await sendToTab(tabId, { cmd: 'inventory_fields' });
                 if (inv && inv.ok) memory.catalog = inv.result;
                 const retry = await sendToTab(tabId, {
                     cmd: 'fill_by_id',
-                    field_id: field.field_id,
-                    value,
-                    selector,
+                    field_id: action.field_id,
+                    value: action.value,
+                    selector: action.selector,
                 });
                 if (retry && retry.ok) {
                     filled += 1;
@@ -825,28 +863,34 @@ async function executeDetailsFromMemory(tabId, memory, llm) {
                 }
             }
             failed += 1;
-            failures.push(`${field.field_id}: ${res && res.error}`);
+            failures.push(`${action.field_id || action.purpose}: ${res && res.error}`);
             continue;
         }
 
-        // Read-after-write
-        const read = await sendToTab(tabId, {
-            cmd: 'read_field',
-            field_id: field.field_id,
-            selector,
-        });
-        if (read && read.ok && !valuesRoughlyEqual(value, read.result.value)) {
-            status(`Verify mismatch on ${field.field_id}: expected "${value}" got "${read.result.value}" — retrying`, 'warn');
-            await sendToTab(tabId, { cmd: 'fill_by_id', field_id: field.field_id, value, selector });
+        if (action.cmd !== 'select') {
+            const read = await sendToTab(tabId, {
+                cmd: 'read_field',
+                field_id: action.field_id,
+                selector: action.selector,
+            });
+            if (read && read.ok && !valuesRoughlyEqual(action.value, read.result.value)) {
+                status(`Verify mismatch on ${action.field_id} - retrying`, 'warn');
+                await sendToTab(tabId, {
+                    cmd: 'fill_by_id',
+                    field_id: action.field_id,
+                    value: action.value,
+                    selector: action.selector,
+                });
+            }
         }
         filled += 1;
-        await sleep(250);
+        await sleep(action.cmd === 'select' ? 400 : 250);
     }
 
     const summary = `Filled ${filled} detail field(s)`
         + (failed ? `, ${failed} failed` : '')
         + (memory.skipped.length ? `, ${memory.skipped.length} skipped` : '')
-        + '. Ready for human review.';
+        + '. Stopped after Fill Details - open Table yourself for line items if needed.';
 
     if (failed && filled === 0) {
         throw new Error(`Fill details failed: ${failures.join('; ')}`);
@@ -866,82 +910,85 @@ async function executeDetailsFromMemory(tabId, memory, llm) {
 async function executeLineItemsFromMemory(tabId, memory, llm) {
     const plan = memory.plan;
     let catalog = memory.catalog;
-    let recoveryLeft = MAX_RECOVERY_CALLS;
 
-    // Open table tab if we have a selector.
-    if (catalog.controls?.table_tab?.selector) {
-        await sendToTab(tabId, { cmd: 'click', selector: catalog.controls.table_tab.selector });
-        await sleep(1400);
-        const refreshed = await sendToTab(tabId, { cmd: 'inventory_table' });
-        if (refreshed && refreshed.ok) {
-            catalog = refreshed.result;
-            memory.catalog = catalog;
-        }
+    // Human already opened Table view — do not click table_tab.
+    const actions = buildLineItemActions(plan, catalog);
+    if (actions.some((a) => a.purpose === 'table_tab')) {
+        throw new Error('Internal error: line-item plan tried to open Table tab');
     }
 
-    if (plan.clear_first && catalog.controls?.clear?.selector) {
-        status('Clearing existing table rows...', 'info');
-        await sendToTab(tabId, { cmd: 'click', selector: catalog.controls.clear.selector });
-        await sleep(1000);
-    }
-
-    const addSelector = catalog.controls?.add_row?.selector;
     let filledRows = 0;
     let failedRows = 0;
     const failures = [];
 
-    for (let i = 0; i < (plan.rows || []).length; i += 1) {
+    for (const action of actions) {
         if (abortRequested) {
             post({ type: 'done', outcome: 'stopped' });
             return;
         }
-        const row = plan.rows[i];
-        status(`Line item ${i + 1}/${plan.rows.length}: ${row.values.join(' | ')}`, 'info');
 
-        let prevCount = 0;
-        const before = await sendToTab(tabId, { cmd: 'inventory_table' });
-        if (before && before.ok) prevCount = before.result.row_count || 0;
+        if (action.purpose === 'clear_table') {
+            status('Clearing existing table rows...', 'info');
+            const res = await sendToTab(tabId, { cmd: 'click', selector: action.selector });
+            if (!res || !res.ok) {
+                failures.push(`clear: ${res && res.error}`);
+            }
+            await sleep(1000);
+            const refreshed = await sendToTab(tabId, { cmd: 'inventory_table' });
+            if (refreshed && refreshed.ok) {
+                catalog = refreshed.result;
+                memory.catalog = catalog;
+            }
+            continue;
+        }
 
-        if (addSelector) {
-            const clickRes = await sendToTab(tabId, { cmd: 'click', selector: addSelector });
+        if (action.purpose === 'add_row') {
+            let prevCount = 0;
+            const before = await sendToTab(tabId, { cmd: 'inventory_table' });
+            if (before && before.ok) prevCount = before.result.row_count || 0;
+
+            status(`Line item ${(action.row_index || 0) + 1}: Add Row`, 'info');
+            const clickRes = await sendToTab(tabId, { cmd: 'click', selector: action.selector });
             if (!clickRes || !clickRes.ok) {
                 failedRows += 1;
-                failures.push(`row ${i + 1}: add_row failed (${clickRes && clickRes.error})`);
-                if (recoveryLeft-- <= 0) break;
+                failures.push(`row ${(action.row_index || 0) + 1}: add_row failed (${clickRes && clickRes.error})`);
                 continue;
             }
-            const waited = await sendToTab(tabId, {
+            await sendToTab(tabId, {
                 cmd: 'wait_for_row',
                 prev_count: prevCount,
                 timeout_ms: 4000,
             });
             await sleep(400);
-            const rowSelector = (waited && waited.ok && waited.result.row_selector)
-                || catalog.row_selector
-                || 'table tbody tr:last-child';
+            continue;
+        }
 
+        if (action.purpose === 'fill_row') {
+            const inv = await sendToTab(tabId, { cmd: 'inventory_table' });
+            const rowSelector = (inv && inv.ok && inv.result.row_selector)
+                || catalog.row_selector
+                || action.row_selector
+                || 'table tbody tr:last-child';
+            status(`Line item ${(action.row_index || 0) + 1}: ${((action.values) || []).join(' | ')}`, 'info');
             const fillRes = await sendToTab(tabId, {
                 cmd: 'fill_row',
                 row_selector: rowSelector,
-                values: row.values,
+                values: action.values || [],
             });
             if (!fillRes || !fillRes.ok) {
                 failedRows += 1;
-                failures.push(`row ${i + 1}: ${fillRes && fillRes.error}`);
+                failures.push(`row ${(action.row_index || 0) + 1}: ${fillRes && fillRes.error}`);
                 continue;
             }
             filledRows += 1;
-        } else {
-            failedRows += 1;
-            failures.push(`row ${i + 1}: no Add Row control found`);
-            break;
+            await sleep(300);
         }
     }
 
     const summary = `Filled ${filledRows} line-item row(s)`
         + (failedRows ? `, ${failedRows} failed` : '')
         + (memory.skipped.length ? `, ${memory.skipped.length} skipped` : '')
-        + '. Ready for human review.';
+        + '. Stopped after Fill Line Items.';
 
     if (filledRows === 0 && (plan.rows || []).length > 0) {
         throw new Error(`Fill line items failed: ${failures.join('; ') || 'no rows filled'}`);

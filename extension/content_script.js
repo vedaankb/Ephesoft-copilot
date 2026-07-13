@@ -836,6 +836,54 @@
         });
     }
 
+    /** Cheap signals for page-gate classification (no LLM). */
+    function pageSignals() {
+        const fieldsInv = inventoryFields();
+        const tableInv = inventoryTable();
+        const text = ((document.body && document.body.innerText) || '').slice(0, 2500);
+        const fields = fieldsInv.fields || [];
+        const hasDocType = !!(fieldsInv.docTypeOptions && fieldsInv.docTypeOptions.length)
+            || fields.some((f) => {
+                const lab = String(f.label || '').toLowerCase();
+                return f.tag === 'select' && /doc|document.?type|^type$/.test(lab);
+            });
+        const hasLineInputs = (tableInv.columns || []).length >= 1
+            && (tableInv.row_count > 0 || !!(tableInv.controls && tableInv.controls.add_row));
+
+        // Rough batch-list row count: tables with many rows but few inputs.
+        let batchRowCount = 0;
+        try {
+            const tables = Array.from(document.querySelectorAll('table'));
+            for (const table of tables) {
+                const inputs = table.querySelectorAll('input, textarea, select').length;
+                const trs = table.querySelectorAll('tr').length;
+                if (trs >= 3 && inputs <= 2) batchRowCount = Math.max(batchRowCount, trs - 1);
+            }
+        } catch (e) { /* ignore */ }
+
+        const blob = `${location.href} ${document.title} ${text}`.toLowerCase();
+        const batchListHints = /\bbatch(es)?\b/.test(blob)
+            || /\bassigned\b/.test(blob)
+            || /work.?queue|inbox|batch.?list/.test(blob);
+
+        return {
+            url: location.href,
+            title: document.title,
+            text_sample: text,
+            field_count: fields.length,
+            select_count: fields.filter((f) => f.tag === 'select').length,
+            has_doc_type_select: hasDocType,
+            table_column_count: (tableInv.columns || []).length,
+            table_row_count: tableInv.row_count || 0,
+            has_add_row: !!(tableInv.controls && tableInv.controls.add_row),
+            has_clear: !!(tableInv.controls && tableInv.controls.clear),
+            has_table_tab: !!(tableInv.controls && tableInv.controls.table_tab),
+            has_line_item_inputs: hasLineInputs,
+            batch_list_hints: batchListHints,
+            batch_row_count: batchRowCount,
+        };
+    }
+
     // --- message router ---
 
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -862,6 +910,7 @@
                 case 'inventory_table': reply(true, inventoryTable()); break;
                 case 'read_field': reply(true, readField(msg.field_id, msg.selector)); break;
                 case 'fill_by_id': reply(true, fillById(msg.field_id, msg.value, msg.selector)); break;
+                case 'page_signals': reply(true, pageSignals()); break;
                 case 'wait_for_row':
                     waitForRow(msg.prev_count, msg.timeout_ms)
                         .then((result) => reply(true, result))

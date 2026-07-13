@@ -66,7 +66,7 @@ function onMessage(msg) {
             break;
         case 'run_started':
             clearResult();
-            addFeed(`Run started: ${msg.mode.toUpperCase()}`, 'info');
+            addFeed(`Run started: ${String(msg.mode || '').toUpperCase()}`, 'info');
             break;
         case 'status':
             addFeed(msg.message, msg.level || 'info');
@@ -77,6 +77,9 @@ function onMessage(msg) {
         case 'key_result':
             els.saveMsg.style.color = msg.ok ? '' : 'var(--red)';
             els.saveMsg.textContent = msg.ok ? 'Key OK' : (msg.error || 'Key failed');
+            break;
+        case 'page_gate_blocked':
+            addPageGateFeed(msg);
             break;
         case 'done':
             showResult(msg);
@@ -106,6 +109,23 @@ function addFeed(message, level = 'info') {
     els.feed.parentElement.scrollTop = els.feed.parentElement.scrollHeight;
     // cap feed length
     while (els.feed.children.length > 200) els.feed.removeChild(els.feed.firstChild);
+    return li;
+}
+
+function addPageGateFeed(msg) {
+    const li = addFeed(msg.message || 'Wrong page for this action. No Gemini calls were made.', 'warn');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'link feed-override';
+    btn.textContent = 'Run anyway';
+    btn.title = 'Override page check and start Gemini for this run';
+    btn.addEventListener('click', () => {
+        btn.disabled = true;
+        btn.textContent = 'Starting...';
+        start(msg.mode, { overridePageGate: true });
+    });
+    li.appendChild(document.createTextNode(' '));
+    li.appendChild(btn);
 }
 
 function clearResult() {
@@ -140,12 +160,23 @@ function showResult(msg) {
     } else if (outcome === 'stopped') {
         title = 'Stopped';
         detail = '<div>Run stopped before completion.</div>';
+    } else if (outcome === 'page_blocked') {
+        title = 'Wrong page';
+        detail = `<div>${escapeHtml(msg.message || 'Open the correct Ephesoft page, or use Run anyway in Activity.')}</div>`;
+        detail += `<div class="page-gate-actions"><button type="button" class="btn btn-small btn-ghost" id="pageGateOverrideBtn">Run anyway</button></div>`;
     } else {
         title = 'Error';
         detail = `<div>${escapeHtml(msg.message || 'Something went wrong.')}</div>`;
     }
     els.resultTitle.textContent = title;
     els.resultDetail.innerHTML = detail;
+
+    if (outcome === 'page_blocked') {
+        const btn = document.getElementById('pageGateOverrideBtn');
+        if (btn) {
+            btn.addEventListener('click', () => start(msg.mode, { overridePageGate: true }));
+        }
+    }
 
     addFeed(`${outcome.toUpperCase()}: ${title}`, outcome === 'complete' ? 'success' : outcome === 'error' ? 'error' : 'warn');
 }
@@ -186,7 +217,7 @@ async function resetSession() {
     loadSettings();
 }
 
-async function start(mode) {
+async function start(mode, opts = {}) {
     // 1. Verify License offline
     const { licenseKey } = await chrome.storage.local.get(['licenseKey']);
     if (!licenseKey) {
@@ -220,12 +251,20 @@ async function start(mode) {
         return;
     }
     clearResult();
+    if (opts.overridePageGate) {
+        addFeed('Page check override enabled for this run — Gemini will run even if the page looks wrong.', 'warn');
+    }
     let tabId;
     try {
         const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
         tabId = tabs[0]?.id;
     } catch (e) { /* fallback handled in service worker */ }
-    send({ type: 'start', mode, tabId });
+    send({
+        type: 'start',
+        mode,
+        tabId,
+        overridePageGate: !!opts.overridePageGate,
+    });
 }
 
 // ---------- settings ----------

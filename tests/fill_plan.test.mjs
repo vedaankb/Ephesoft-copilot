@@ -542,13 +542,14 @@ describe('repo audit: update.ps1', () => {
         assert.match(t, /EphesoftCopilot/);
         assert.match(t, /app-/);
         assert.match(t, /profile/);
-        assert.match(t, /VERSION\.json/);
+        assert.match(t, /VERSION\.txt/);
         assert.match(t, /main\.zip/);
-        assert.match(t, /Updating Chrome shortcut/);
+        assert.doesNotMatch(t, /Write-Host/);
     });
     it('install.ps1 ships update.ps1', () => {
         const t = fs.readFileSync(installPath, 'utf8');
         assert.match(t, /update\.ps1/);
+        assert.doesNotMatch(t, /Write-Host/);
     });
 });
 
@@ -568,8 +569,11 @@ describe('repo audit: fill_plan module exports used by SW', () => {
         'MAX_RECOVERY_CALLS',
         'buildDecidePrompt',
         'buildGatherPrompt',
+        'buildDetailsActions',
+        'buildLineItemActions',
+        'isAllowedGatherClick',
+        'isTableTabClick',
         'modeLabel',
-        'preflightDetails',
         'sanitizeDetailsPlan',
         'sanitizeLineItemsPlan',
         'summarizeContextBuffer',
