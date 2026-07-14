@@ -1036,14 +1036,36 @@
         };
     }
 
-    function inventoryTable() {
-        const controls = {
-            table_tab: findControlByText([/^tables?$/i, /table/i]),
-            add_row: findControlByText([/add\s*row/i, /^\+$/, /insert\s*row/i]),
-            clear: findControlByText([/^clear(\s*all)?$/i, /clear\s*table/i]),
-        };
+    function collectDataRows(root) {
+        if (!root) return [];
+        const trRows = Array.from(root.querySelectorAll('tbody tr, tr')).filter((tr) => (
+            tr.querySelectorAll('input, textarea, select').length > 0
+        ));
+        if (trRows.length) return trRows;
+        // GWT / div grids: role=row or repeated row-like divs with inputs.
+        const roleRows = Array.from(root.querySelectorAll('[role="row"]')).filter((el) => (
+            el.querySelectorAll('input, textarea, select').length > 0
+        ));
+        if (roleRows.length) return roleRows;
+        const divRows = Array.from(root.querySelectorAll('div, li')).filter((el) => {
+            const inputs = el.querySelectorAll('input, textarea, select');
+            if (inputs.length < 1) return false;
+            if (el.querySelector('div, li') && el.querySelectorAll('input, textarea, select').length > 4) {
+                // container, not a row
+                return false;
+            }
+            return isVisible(el);
+        });
+        // Keep leafiest rows (fewest descendants with inputs).
+        return divRows.filter((el) => {
+            const childWithInputs = Array.from(el.querySelectorAll('div, li')).filter((c) => (
+                c.querySelectorAll('input, textarea, select').length > 0 && c !== el
+            ));
+            return childWithInputs.length === 0;
+        });
+    }
 
-        // Prefer a table that looks like a line-item grid (has inputs in rows).
+    function findLineItemGridRoot() {
         const tables = Array.from(document.querySelectorAll('table'));
         let best = null;
         let bestScore = -1;
@@ -1056,16 +1078,108 @@
                 best = table;
             }
         }
+        if (best && best.querySelectorAll('input, textarea, select').length >= 2) {
+            return { root: best, kind: 'table' };
+        }
+
+        const grids = Array.from(document.querySelectorAll(
+            '[role="grid"], [role="table"], [class*="FlexTable"], [class*="flexTable"], '
+            + '[class*="line-item"], [class*="lineitem"], [id*="lineItem"], [id*="line_item"]'
+        ));
+        for (const grid of grids) {
+            const inputs = grid.querySelectorAll('input, textarea, select');
+            const dataRows = collectDataRows(grid);
+            const score = inputs.length * 10 + dataRows.length * 5;
+            if (score > bestScore && inputs.length >= 2) {
+                bestScore = score;
+                best = grid;
+            }
+        }
+        if (best) return { root: best, kind: 'grid' };
+
+        // Last resort: any cluster of 3+ inputs in a shared parent.
+        const inputs = Array.from(document.querySelectorAll('input, textarea, select')).filter((el) => {
+            const t = (el.getAttribute('type') || '').toLowerCase();
+            return t !== 'hidden' && !el.disabled && isVisible(el);
+        });
+        const parentCounts = new Map();
+        for (const el of inputs) {
+            const p = el.closest('table, [role="grid"], div, tbody') || el.parentElement;
+            if (!p) continue;
+            parentCounts.set(p, (parentCounts.get(p) || 0) + 1);
+        }
+        let bestParent = null;
+        let bestCount = 0;
+        for (const [p, count] of parentCounts) {
+            if (count > bestCount) {
+                bestCount = count;
+                bestParent = p;
+            }
+        }
+        if (bestParent && bestCount >= 2) return { root: bestParent, kind: 'cluster' };
+        return { root: best, kind: 'table' };
+    }
+
+    function findControlNearTable(patterns, gridRoot) {
+        const near = gridRoot
+            ? [gridRoot, gridRoot.parentElement, gridRoot.closest('div'), document.body].filter(Boolean)
+            : [document.body];
+        for (const scope of near) {
+            const candidates = Array.from(scope.querySelectorAll(
+                'button, a, [role="button"], input[type="button"], span, div, img, td, [onclick]'
+            ));
+            for (const pat of patterns) {
+                const re = typeof pat === 'string' ? new RegExp(pat, 'i') : pat;
+                for (const el of candidates) {
+                    if (bannedReason(el)) continue;
+                    const t = visibleLabel(el) || elementLabel(el);
+                    const aria = (el.getAttribute && (
+                        el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt')
+                    )) || '';
+                    const blob = `${t} ${aria}`.trim();
+                    if (blob && re.test(blob) && isVisible(el)) {
+                        const target = resolveClickTarget(el);
+                        const sel = buildSelector(target) || buildSelector(el)
+                            || (target.id ? `#${target.id}` : null);
+                        if (sel) {
+                            return {
+                                label: (target.innerText || el.innerText || aria || '').trim().slice(0, 80),
+                                selector: sel,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        return findControlByText(patterns);
+    }
+
+    function inventoryTable() {
+        const grid = findLineItemGridRoot();
+        const best = grid.root;
+        const controls = {
+            table_tab: findControlByText([/^tables?$/i, /\btable\b/i]),
+            add_row: findControlNearTable([
+                /add\s*row/i,
+                /insert\s*row/i,
+                /new\s*row/i,
+                /add\s*line/i,
+                /^\+$/,
+                /^add$/i,
+            ], best),
+            clear: findControlNearTable([/^clear(\s*all)?$/i, /clear\s*table/i, /remove\s*all/i], best),
+        };
 
         const columns = [];
         let rowSelector = null;
         let rowCount = 0;
+        const rowSelectors = [];
 
         if (best) {
-            const headerCells = best.querySelectorAll('thead th, thead td, tr:first-child th');
+            const headerCells = best.querySelectorAll('thead th, thead td, tr:first-child th, [role="columnheader"]');
             let ci = 0;
             headerCells.forEach((th) => {
-                const label = (th.innerText || '').trim();
+                const label = (th.innerText || th.getAttribute('aria-label') || '').trim();
                 if (!label) return;
                 columns.push({
                     column_id: `${slugifyLabel(label)}_${ci}`,
@@ -1074,25 +1188,41 @@
                 });
                 ci += 1;
             });
-            // If no headers, invent columns from first data row inputs.
+            // Div-grid headers: label row above inputs.
             if (!columns.length) {
-                const firstRow = best.querySelector('tbody tr, tr:nth-child(2), tr');
-                if (firstRow) {
-                    const inputs = Array.from(firstRow.querySelectorAll('input, textarea, select')).filter((el) => {
-                        const t = (el.getAttribute('type') || '').toLowerCase();
-                        return t !== 'hidden' && !el.disabled;
+                const labelNodes = Array.from(best.querySelectorAll('th, [role="columnheader"], label, .label, [class*="header"]'));
+                const seen = new Set();
+                labelNodes.forEach((node) => {
+                    const label = (node.innerText || node.getAttribute('aria-label') || '').trim();
+                    if (!label || label.length > 80 || seen.has(label.toLowerCase())) return;
+                    seen.add(label.toLowerCase());
+                    columns.push({
+                        column_id: `${slugifyLabel(label)}_${columns.length}`,
+                        label,
+                        index: columns.length,
                     });
-                    inputs.forEach((el, i) => {
-                        const label = associatedLabel(el) || `col_${i}`;
-                        columns.push({ column_id: `${slugifyLabel(label)}_${i}`, label, index: i });
-                    });
-                }
+                });
+            }
+            const dataRows = collectDataRows(best);
+            rowCount = dataRows.length;
+            dataRows.forEach((rowEl, idx) => {
+                const sel = buildSelector(rowEl)
+                    || (rowEl.id ? `#${rowEl.id}` : null)
+                    || (best.tagName === 'TABLE' ? `table tbody tr:nth-child(${idx + 1})` : null);
+                if (sel) rowSelectors.push(sel);
+            });
+            if (!columns.length && dataRows.length) {
+                const firstRow = dataRows[0];
+                const inputs = Array.from(firstRow.querySelectorAll('input, textarea, select')).filter((el) => {
+                    const t = (el.getAttribute('type') || '').toLowerCase();
+                    return t !== 'hidden' && !el.disabled;
+                });
+                inputs.forEach((el, i) => {
+                    const label = associatedLabel(el) || `col_${i}`;
+                    columns.push({ column_id: `${slugifyLabel(label)}_${i}`, label, index: i });
+                });
             }
 
-            const dataRows = Array.from(best.querySelectorAll('tbody tr, tr')).filter((tr) => (
-                tr.querySelectorAll('input, textarea, select').length > 0
-            ));
-            rowCount = dataRows.length;
             if (dataRows.length) {
                 const last = dataRows[dataRows.length - 1];
                 rowSelector = buildSelector(last)
@@ -1102,7 +1232,64 @@
             }
         }
 
-        return { columns, controls, row_selector: rowSelector, row_count: rowCount };
+        return {
+            columns,
+            controls,
+            row_selector: rowSelector,
+            row_selectors: rowSelectors,
+            row_count: rowCount,
+            grid_kind: grid.kind,
+        };
+    }
+
+    function domFillRowAtIndex(rowIndex, values) {
+        const inv = inventoryTable();
+        const idx = Number(rowIndex) || 0;
+        let row = null;
+        if (inv.row_selectors && inv.row_selectors.length) {
+            const sel = inv.row_selectors[Math.min(idx, inv.row_selectors.length - 1)];
+            try { row = query(sel); } catch (e) { row = null; }
+        }
+        if (!row) {
+            const grid = findLineItemGridRoot();
+            const dataRows = collectDataRows(grid.root);
+            row = dataRows[Math.min(idx, Math.max(0, dataRows.length - 1))] || null;
+        }
+        if (!row) throw new Error(`No table row at index ${idx}`);
+        const inputs = Array.from(row.querySelectorAll('input, textarea, select')).filter((el) => {
+            const t = (el.getAttribute('type') || '').toLowerCase();
+            if (t === 'hidden') return false;
+            if (el.disabled || el.readOnly) return false;
+            return true;
+        });
+        let filled = 0;
+        for (let i = 0; i < values.length && i < inputs.length; i += 1) {
+            const el = inputs[i];
+            el.focus && el.focus();
+            const val = values[i];
+            if (el instanceof HTMLSelectElement) {
+                const want = String(val).toLowerCase().trim();
+                let matched = null;
+                for (const opt of el.options) {
+                    const ov = (opt.value || '').toLowerCase().trim();
+                    const ot = (opt.text || '').toLowerCase().trim();
+                    if (ov === want || ot === want || ot.includes(want) || ov.includes(want)) {
+                        matched = opt.value;
+                        break;
+                    }
+                }
+                setNativeValue(el, matched !== null ? matched : val);
+            } else if ('value' in el) {
+                setNativeValue(el, val);
+            } else {
+                el.textContent = val;
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            filled += 1;
+        }
+        return { filled, row_index: idx, column_count: inputs.length };
     }
 
     function readField(fieldId, selector) {
@@ -1222,6 +1409,7 @@
                 case 'select': reply(true, domSelect(msg.selector, msg.value)); break;
                 case 'click': reply(true, domClick(msg.selector)); break;
                 case 'fill_row': reply(true, domFillRow(msg.row_selector, msg.values || [])); break;
+                case 'fill_row_at_index': reply(true, domFillRowAtIndex(msg.row_index, msg.values || [])); break;
                 case 'exists': reply(true, domExists(msg.selector)); break;
                 case 'scroll': reply(true, domScroll(msg.selector, msg.direction)); break;
                 case 'set_scroll_y': reply(true, setScrollY(msg.y)); break;

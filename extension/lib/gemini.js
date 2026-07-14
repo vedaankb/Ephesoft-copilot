@@ -33,17 +33,23 @@ function withTimeout(external, timeoutMs) {
 }
 
 /**
- * Call generateContent with an optional inline screenshot.
+ * Call generateContent with optional inline screenshot(s).
+ * @param {object} opts
+ * @param {string} [opts.imageB64] single image (backward compatible)
+ * @param {string[]} [opts.imagesB64] multiple images (e.g. gather snapshots for line items)
  * @returns {Promise<string>} the model's text output (expected to be JSON)
  */
-export async function callGemini({ apiKey, model, systemInstruction, userText, imageB64, signal, timeoutMs }) {
+export async function callGemini({ apiKey, model, systemInstruction, userText, imageB64, imagesB64, signal, timeoutMs }) {
     if (!apiKey) throw new Error('No Gemini API key set. Open Settings in the panel and paste your key.');
     const mdl = model || 'gemini-3.5-flash';
     const url = `${API_BASE}/${encodeURIComponent(mdl)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
     const parts = [{ text: userText }];
-    if (imageB64) {
-        parts.push({ inline_data: { mime_type: 'image/png', data: imageB64 } });
+    const imgs = Array.isArray(imagesB64) && imagesB64.length
+        ? imagesB64.filter(Boolean)
+        : (imageB64 ? [imageB64] : []);
+    for (const img of imgs.slice(0, 6)) {
+        parts.push({ inline_data: { mime_type: 'image/png', data: img } });
     }
 
     const body = {

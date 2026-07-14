@@ -134,10 +134,11 @@ Use ONLY `field_id` values from the catalog provided in the decide prompt. Omit 
 1. Prerequisite: the HUMAN has already clicked the Table tab/view. Do not click Table yourself.
 2. GATHER: scroll the document (and table if needed) to see all billable lines. Turn document
    pages via VIEWER CONTROLS when needed. Do NOT Add Row or fill cells during gather. Call
-   `done_gathering`.
-3. DECIDE: return ordered `rows` aligned to catalog columns; set `clear_first` if stale rows
-   exist. Follow SOP include/exclude rules. Omit uncertain rows.
-4. The extension clears if requested, then Add Row + fill_row for each planned row, and STOPS.
+   `done_gathering` only after you have seen every page that contains line items.
+3. DECIDE: return one `rows[]` entry per billable line. Each `values` array MUST match the
+   TABLE CATALOG column count and order exactly. Set `clear_first:true` when stale rows exist.
+   Follow SOP include/exclude rules. Omit uncertain rows.
+4. The extension clears if requested, then Add Row + fill for each planned row, and STOPS.
 
 ### Line items SOP reminders
 

@@ -14,6 +14,7 @@ import {
     batchListPageChanged,
     batchOpened,
     buildDetailsActions,
+    buildDecidePrompt,
     buildGatherPrompt,
     buildLineItemActions,
     buildNextExtrasPrompt,
@@ -23,11 +24,13 @@ import {
     isPaginationClick,
     isTableTabClick,
     isViewerCatalogClick,
+    MAX_GATHER_STEPS_LINE_ITEMS,
     pickNextBatch,
     sanitizeDetailsPlan,
     sanitizeLineItemsPlan,
     signalsChanged,
     simulateFillRun,
+    validateLineItemsExecution,
     viewerPageChanged,
 } from '../extension/lib/fill_plan.js';
 
@@ -300,6 +303,45 @@ describe('click effect verification helpers', () => {
     });
 });
 
+describe('Fill Line Items plan and execution guards', () => {
+    const cat = tableCatalog();
+
+    it('auto clear_first when stale rows exist', () => {
+        const { plan } = sanitizeLineItemsPlan({
+            rows: [{ values: ['Exam', '100'], confidence: 1 }],
+        }, { ...cat, row_count: 2 });
+        assert.equal(plan.clear_first, true);
+    });
+
+    it('pads values to column count', () => {
+        const { plan } = sanitizeLineItemsPlan({
+            rows: [{ values: ['Exam'], confidence: 1 }],
+        }, cat);
+        assert.equal(plan.rows[0].values.length, 2);
+    });
+
+    it('decide prompt stresses column count and screenshots', () => {
+        const p = buildDecidePrompt('fill_line_items', 'ctx', cat, { screenshotCount: 3 });
+        assert.match(p, /exactly 2 entries/);
+        assert.match(p, /3 screenshot/);
+        assert.match(p, /ONE row per billable/);
+    });
+
+    it('validateLineItemsExecution requires add_row and columns', () => {
+        const { plan } = sanitizeLineItemsPlan({
+            rows: [{ values: ['A', '1'], confidence: 1 }],
+        }, cat);
+        assert.equal(validateLineItemsExecution(plan, cat).ok, true);
+        const bad = validateLineItemsExecution(plan, { ...cat, controls: { add_row: null } });
+        assert.equal(bad.ok, false);
+        assert.ok(bad.errors.includes('add_row_control_not_found'));
+    });
+
+    it('gather allows more steps for line items constant', () => {
+        assert.ok(MAX_GATHER_STEPS_LINE_ITEMS > 8);
+    });
+});
+
 describe('NEXT batch navigation picker', () => {
     const batches = [
         { id: 'B3', created: '2024-03-01', status: 'Ready', assigned_to: '' },
@@ -453,6 +495,15 @@ describe('repo audit: human opens Table / agent stops after fill', () => {
         assert.match(sw, /inventory_batch_list/);
         assert.match(sw, /pickNextBatch/);
         assert.match(sw, /buildNextExtrasPrompt/);
+        assert.match(sw, /fill_row_at_index/);
+        assert.match(sw, /validateLineItemsExecution/);
+        assert.match(sw, /imagesB64/);
+    });
+    it('content script line item fill helpers', () => {
+        const cs = fs.readFileSync(path.join(root, 'extension/content_script.js'), 'utf8');
+        assert.match(cs, /fill_row_at_index/);
+        assert.match(cs, /row_selectors/);
+        assert.match(cs, /findLineItemGridRoot/);
     });
     it('prompts say human opens Table and details stop', () => {
         assert.match(sys, /HUMAN has already clicked the Table/i);

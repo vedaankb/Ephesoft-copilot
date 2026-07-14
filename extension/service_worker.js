@@ -12,6 +12,7 @@ import { callGemini, parseJsonResponse, testApiKey } from './lib/gemini.js';
 import { verifyLicenseOffline } from './lib/license.js';
 import {
     MAX_GATHER_STEPS,
+    MAX_GATHER_STEPS_LINE_ITEMS,
     MAX_RECOVERY_CALLS,
     batchListPageChanged,
     batchOpened,
@@ -32,6 +33,7 @@ import {
     sanitizeDetailsPlan,
     sanitizeLineItemsPlan,
     summarizeContextBuffer,
+    validateLineItemsExecution,
     valuesRoughlyEqual,
     viewerPageChanged,
 } from './lib/fill_plan.js';
@@ -298,22 +300,24 @@ function startThinkingHeartbeat(hasVision) {
 
 // Calls Gemini with a heartbeat. On timeout, retries ONCE with a lighter payload
 // (no screenshot, trimmed HTML) so a slow/complex step can still make progress.
-async function think({ apiKey, model, systemInstruction, userText, imageB64, signal, liteUserText }) {
-    const stop = startThinkingHeartbeat(!!imageB64);
+async function think({ apiKey, model, systemInstruction, userText, imageB64, imagesB64, signal, liteUserText }) {
+    const hasVision = !!(imageB64 || (imagesB64 && imagesB64.length));
+    const stop = startThinkingHeartbeat(hasVision);
     try {
-        return await callGemini({ apiKey, model, systemInstruction, userText, imageB64, signal });
+        return await callGemini({ apiKey, model, systemInstruction, userText, imageB64, imagesB64, signal });
     } catch (e) {
         if (abortRequested || (e && e.name === 'AbortError')) throw e;
         const isTimeout = /timed out/i.test(e && e.message || '');
         if (!isTimeout) throw e;
         status('Step is slow - retrying once with a lighter request...', 'warn');
-        // Retry: drop the image and use a trimmed prompt to reduce inference time.
+        // Retry: drop images and use a trimmed prompt to reduce inference time.
         return await callGemini({
             apiKey,
             model,
             systemInstruction,
             userText: liteUserText || userText,
             imageB64: undefined,
+            imagesB64: undefined,
             signal,
         });
     } finally {
@@ -751,7 +755,8 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
     const gatherHistory = [];
     const failedSelectors = [];
     let viewerNoEffectStreak = 0;
-    for (let step = 1; step <= MAX_GATHER_STEPS; step += 1) {
+    const maxGather = mode === 'fill_line_items' ? MAX_GATHER_STEPS_LINE_ITEMS : MAX_GATHER_STEPS;
+    for (let step = 1; step <= maxGather; step += 1) {
         if (abortRequested) {
             status('Stopped by user.', 'warn');
             post({ type: 'done', outcome: 'stopped' });
@@ -767,6 +772,7 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
             html: (o.html || '').slice(0, 80000),
             scrollY: o.scroll && o.scroll.y,
             url: o.url,
+            screenshot: (mode === 'fill_line_items' && shot) ? shot : undefined,
         });
 
         let viewerCatalog = null;
@@ -909,17 +915,24 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
     // --- Phase 2: Decide into memory ---
     status('Deciding field/row values from gathered context...', 'think');
     const contextSummary = summarizeContextBuffer(memory.context);
-    const decideText = buildDecidePrompt(mode, contextSummary, memory.catalog);
-    // Attach latest screenshot for decide.
+    const gatherShots = mode === 'fill_line_items'
+        ? memory.context.map((c) => c.screenshot).filter(Boolean).slice(-6)
+        : [];
+    const decideExtras = mode === 'fill_line_items'
+        ? { screenshotCount: gatherShots.length || 1 }
+        : {};
+    const decideText = buildDecidePrompt(mode, contextSummary, memory.catalog, decideExtras);
     const lastShot = await captureViewport(tab.windowId);
+    const decideImages = gatherShots.length ? gatherShots : (lastShot ? [lastShot] : []);
     const decideRaw = await think({
         apiKey: geminiApiKey,
         model: geminiModel,
         systemInstruction,
         userText: decideText,
-        imageB64: lastShot || undefined,
+        imagesB64: decideImages.length ? decideImages : undefined,
+        imageB64: decideImages.length === 1 ? decideImages[0] : undefined,
         signal,
-        liteUserText: buildDecidePrompt(mode, contextSummary.slice(0, 12000), memory.catalog),
+        liteUserText: buildDecidePrompt(mode, contextSummary.slice(0, 12000), memory.catalog, decideExtras),
     });
 
     let decideObj;
@@ -931,7 +944,8 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
             model: geminiModel,
             systemInstruction,
             userText: decideText + '\n\nPrevious reply was not valid JSON. Respond with ONLY JSON.',
-            imageB64: lastShot || undefined,
+            imagesB64: decideImages.length ? decideImages : undefined,
+            imageB64: decideImages.length === 1 ? decideImages[0] : undefined,
             signal,
         });
         decideObj = parseJsonResponse(raw2);
@@ -1089,6 +1103,18 @@ async function executeLineItemsFromMemory(tabId, memory, llm) {
     const plan = memory.plan;
     let catalog = memory.catalog;
 
+    const preflight = validateLineItemsExecution(plan, catalog);
+    if (!preflight.ok) {
+        const msg = preflight.errors.join(', ');
+        if (preflight.errors.includes('no_columns_inventoried')) {
+            throw new Error(`Could not read table columns on screen. Open the Table view with visible column headers, then retry. (${msg})`);
+        }
+        if (preflight.errors.includes('add_row_control_not_found')) {
+            throw new Error(`Could not find the Add Row button. Ensure the Table view is open and the line-item grid is visible. (${msg})`);
+        }
+        throw new Error(`Line items preflight failed: ${msg}`);
+    }
+
     // Human already opened Table view — do not click table_tab.
     const actions = buildLineItemActions(plan, catalog);
     if (actions.some((a) => a.purpose === 'table_tab')) {
@@ -1138,24 +1164,33 @@ async function executeLineItemsFromMemory(tabId, memory, llm) {
                 timeout_ms: 4000,
             });
             await sleep(400);
+            const afterAdd = await sendToTab(tabId, { cmd: 'inventory_table' });
+            if (afterAdd && afterAdd.ok) {
+                catalog = afterAdd.result;
+                memory.catalog = catalog;
+            }
             continue;
         }
 
         if (action.purpose === 'fill_row') {
             const inv = await sendToTab(tabId, { cmd: 'inventory_table' });
-            const rowSelector = (inv && inv.ok && inv.result.row_selector)
-                || catalog.row_selector
-                || action.row_selector
-                || 'table tbody tr:last-child';
+            const rowCount = (inv && inv.ok && inv.result.row_count) || catalog.row_count || 0;
+            const rowIdx = rowCount > 0 ? rowCount - 1 : (action.row_index != null ? action.row_index : 0);
             status(`Line item ${(action.row_index || 0) + 1}: ${((action.values) || []).join(' | ')}`, 'info');
             const fillRes = await sendToTab(tabId, {
-                cmd: 'fill_row',
-                row_selector: rowSelector,
+                cmd: 'fill_row_at_index',
+                row_index: rowIdx,
                 values: action.values || [],
             });
             if (!fillRes || !fillRes.ok) {
                 failedRows += 1;
-                failures.push(`row ${(action.row_index || 0) + 1}: ${fillRes && fillRes.error}`);
+                failures.push(`row ${rowIdx + 1}: ${fillRes && fillRes.error}`);
+                continue;
+            }
+            const filled = fillRes.result && fillRes.result.filled;
+            if (!filled) {
+                failedRows += 1;
+                failures.push(`row ${rowIdx + 1}: no cells filled`);
                 continue;
             }
             filledRows += 1;

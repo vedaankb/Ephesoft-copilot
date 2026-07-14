@@ -5,6 +5,7 @@
 
 export const CONFIDENCE_THRESHOLD = 0.55;
 export const MAX_GATHER_STEPS = 8;
+export const MAX_GATHER_STEPS_LINE_ITEMS = 14;
 export const MAX_RECOVERY_CALLS = 3;
 export const ALLOWED_INCOMPLETE = Object.freeze([
     'Missing Invoice',
@@ -285,6 +286,12 @@ export function sanitizeLineItemsPlan(raw, catalog, opts = {}) {
             continue;
         }
 
+        // Pad or trim to match catalog column count so fill_row aligns with inputs.
+        if (columns.length) {
+            while (values.length < columns.length) values.push('');
+            if (values.length > columns.length) values = values.slice(0, columns.length);
+        }
+
         if (!values.some((v) => String(v).trim() !== '')) {
             skipped.push({ row: ri, reason: 'empty_row' });
             continue;
@@ -292,12 +299,18 @@ export function sanitizeLineItemsPlan(raw, catalog, opts = {}) {
         rows.push({ values, confidence: conf });
     }
 
+    const existingRows = (catalog && catalog.row_count) || 0;
+    let clearFirst = !!raw.clear_first;
+    if (!clearFirst && existingRows > 0 && rows.length > 0) {
+        clearFirst = true;
+    }
+
     return {
         ok: true,
         plan: {
             kind: 'fill_line_items',
             rows,
-            clear_first: !!raw.clear_first,
+            clear_first: clearFirst,
             flags: Array.isArray(raw.flags) ? raw.flags : [],
             note: raw.note || '',
             table_controls: catalog && catalog.controls ? catalog.controls : null,
@@ -530,17 +543,28 @@ export function buildNextExtrasPrompt(batchCatalog, failedSelectors, recommended
     return parts.join('\n');
 }
 
-export function buildDecidePrompt(mode, contextSummary, catalog) {
+export function buildDecidePrompt(mode, contextSummary, catalog, extras = {}) {
     if (mode === 'fill_line_items') {
+        const colCount = (catalog && catalog.columns || []).length;
+        const shotNote = extras.screenshotCount
+            ? `${extras.screenshotCount} screenshot(s) from gather are attached — read line items from the DOCUMENT in those images.`
+            : 'A screenshot is attached — read billable line items from the document.';
         return [
-            'PHASE: DECIDE (FILL LINE ITEMS). Map document line items to table columns.',
+            'PHASE: DECIDE (FILL LINE ITEMS). Map EVERY billable line item from the document to table rows.',
+            shotNote,
             'Respond with ONE JSON object:',
-            '{"rows":[{"values":["desc","amount",...],"confidence":0.0-1.0}],"clear_first":true|false,"flags":[],"note":"..."}',
+            '{"rows":[{"values":["<col0>","<col1>",...],"confidence":0.0-1.0}],"clear_first":true|false,"flags":[],"note":"..."}',
             'Or {"incomplete":true,"reason":"Missing Information"|"Missing Invoice"|"Illegible Documents","note":"..."}.',
-            'Use ONLY the column order from the catalog below. Prefer clear_first if stale rows exist.',
-            'Omit low-confidence rows rather than guessing.',
             '',
-            'TABLE CATALOG:',
+            'RULES:',
+            `- The table has ${colCount || '?'} columns — each row.values array MUST have exactly ${colCount || 'the catalog'} entries in catalog column order.`,
+            '- Create ONE row per billable document line the SOP says to include (do not merge lines).',
+            '- Strip $ and commas from amount columns; use plain numbers.',
+            '- Set clear_first:true when stale rows already exist in the table catalog.',
+            '- Include all pages of line items you saw during gather (multi-page invoices).',
+            '- Omit uncertain rows rather than guessing; do not return an empty rows array if lines are clearly visible.',
+            '',
+            'TABLE CATALOG (column order is authoritative):',
             JSON.stringify(catalog, null, 2),
             '',
             'GATHERED CONTEXT SUMMARY:',
@@ -679,6 +703,21 @@ export function buildDetailsActions(plan, catalog) {
 }
 
 /**
+ * Validate line-item execution prerequisites before DOM actions.
+ */
+export function validateLineItemsExecution(plan, catalog) {
+    const errors = [];
+    const rows = (plan && plan.rows) || [];
+    const columns = (catalog && catalog.columns) || [];
+    const controls = (catalog && catalog.controls) || {};
+    if (!rows.length) errors.push('no_rows_planned');
+    if (!columns.length) errors.push('no_columns_inventoried');
+    const addSel = controls.add_row && controls.add_row.selector;
+    if (rows.length > 0 && !addSel) errors.push('add_row_control_not_found');
+    return { ok: errors.length === 0, errors, addSelector: addSel };
+}
+
+/**
  * Build the deterministic DOM command sequence for Fill Line Items.
  * Assumes the human already opened Table view — never emits a table_tab click.
  */
@@ -699,9 +738,9 @@ export function buildLineItemActions(plan, catalog) {
         actions.push({
             cmd: 'fill_row',
             row_selector: rowSelector,
+            row_index: i,
             values: row.values,
             purpose: 'fill_row',
-            row_index: i,
         });
     }
     return actions;
