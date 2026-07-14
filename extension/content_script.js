@@ -308,10 +308,25 @@
     // Resolve the element that actually carries the click behaviour. Models often
     // target a <span>/<div> holding the visible text (e.g. a batch number) when the
     // real handler lives on an enclosing <a>, <button>, row, or [onclick] element.
+    // Also lift decorative img/icon nodes to GWT / role=button parents.
     function resolveClickTarget(el) {
+        if (!el) return el;
+        if (el.tagName && /^(IMG|SVG|I|SPAN)$/i.test(el.tagName)) {
+            const iconParent = el.closest && el.closest(
+                'a[href], button, [role="button"], [role="link"], [onclick], '
+                + '[class*="Button"], [class*="button"], td, th, li'
+            );
+            if (iconParent && !bannedReason(iconParent)) {
+                const deeper = iconParent.closest
+                    && iconParent.closest('a[href], button, [role="button"], [role="link"], [onclick]');
+                if (deeper && !bannedReason(deeper)) return deeper;
+                return iconParent;
+            }
+        }
         const actionable = el.closest && el.closest(
             'a[href], button, [role="button"], [role="link"], input[type="button"], '
-            + 'input[type="submit"], [onclick], td[onclick], tr[onclick], li[onclick]'
+            + 'input[type="submit"], [onclick], td[onclick], tr[onclick], li[onclick], '
+            + '[class*="Button"], [class*="gwt-"]'
         );
         if (actionable && !bannedReason(actionable)) return actionable;
         return el;
@@ -697,24 +712,328 @@
 
     function findControlByText(patterns) {
         const candidates = Array.from(document.querySelectorAll(
-            'button, a, [role="button"], input[type="button"], span, div'
+            'button, a, [role="button"], [role="link"], input[type="button"], '
+            + 'span, div, img, td, th, li, [onclick], [class*="Button"], [class*="button"]'
         ));
         for (const pat of patterns) {
             const re = typeof pat === 'string' ? new RegExp(pat, 'i') : pat;
             for (const el of candidates) {
                 if (bannedReason(el)) continue;
                 const t = visibleLabel(el) || elementLabel(el);
-                if (t && re.test(t) && isVisible(el)) {
-                    const selector = buildSelector(el)
-                        || (el.id ? `#${el.id}` : null);
-                    // Prefer a clickable ancestor if this node is a plain span.
+                const aria = (el.getAttribute && (
+                    el.getAttribute('aria-label')
+                    || el.getAttribute('title')
+                    || el.getAttribute('alt')
+                    || (el.tagName === 'IMG' && (el.alt || el.title))
+                )) || '';
+                const blob = `${t} ${aria}`.trim();
+                if (blob && re.test(blob) && isVisible(el)) {
                     const target = resolveClickTarget(el);
-                    const sel = buildSelector(target) || selector;
-                    if (sel) return { label: (target.innerText || el.innerText || '').trim().slice(0, 80), selector: sel };
+                    const sel = buildSelector(target)
+                        || buildSelector(el)
+                        || (target.id ? `#${target.id}` : null)
+                        || (el.id ? `#${el.id}` : null);
+                    if (sel) {
+                        return {
+                            label: (target.innerText || el.innerText || aria || '').trim().slice(0, 80),
+                            selector: sel,
+                        };
+                    }
                 }
             }
         }
         return null;
+    }
+
+    function findScrollContainerNear(el) {
+        if (!el) return null;
+        const sc = scrollableAncestor(el);
+        if (sc && sc !== document.body) {
+            return buildSelector(sc) || (sc.id ? `#${sc.id}` : null);
+        }
+        return null;
+    }
+
+    function scoreViewerCandidate(el) {
+        if (!isVisible(el)) return -1;
+        const r = el.getBoundingClientRect();
+        const area = Math.max(0, r.width) * Math.max(0, r.height);
+        const blob = `${el.id || ''} ${el.className || ''} ${el.getAttribute && el.getAttribute('title') || ''}`.toLowerCase();
+        let bonus = 0;
+        if (/viewer|document|image|preview|page/.test(blob)) bonus += 50000;
+        // Prefer left half of viewport (typical Ephesoft layout).
+        if (r.left + r.width / 2 < (window.innerWidth || 0) * 0.55) bonus += 10000;
+        return area + bonus;
+    }
+
+    function findViewerRegion() {
+        const candidates = Array.from(document.querySelectorAll(
+            'img, canvas, iframe, [class*="viewer"], [id*="viewer"], [class*="document"], '
+            + '[id*="document"], [class*="image"], [id*="image"], [class*="preview"]'
+        ));
+        let best = null;
+        let bestScore = 0;
+        for (const el of candidates) {
+            const s = scoreViewerCandidate(el);
+            if (s > bestScore) {
+                bestScore = s;
+                best = el;
+            }
+        }
+        if (!best) return null;
+        // Prefer a reasonable container, not a tiny icon.
+        const region = best.closest
+            && best.closest('[class*="viewer"], [id*="viewer"], [class*="document"], [id*="document"], .center, td, div')
+            || best.parentElement
+            || best;
+        return { region, primary: best };
+    }
+
+    function extractPageLabelNear(root) {
+        const searchRoots = [root, document.body].filter(Boolean);
+        const re = /(?:page\s*)?(\d+)\s*(?:of|\/)\s*(\d+)/i;
+        for (const rootEl of searchRoots) {
+            const text = (rootEl.innerText || '').slice(0, 4000);
+            const m = text.match(re);
+            if (m) return `${m[1]} of ${m[2]}`;
+        }
+        // Also check aria / toolbar inputs.
+        const toolbar = document.querySelectorAll('input, span, div, label');
+        for (const el of toolbar) {
+            const v = (el.value || el.innerText || el.getAttribute('aria-label') || '').trim();
+            const m = v.match(re);
+            if (m && isVisible(el)) return `${m[1]} of ${m[2]}`;
+        }
+        return '';
+    }
+
+    function inventoryViewer() {
+        const found = findViewerRegion();
+        const region = found && found.region;
+        const primary = found && found.primary;
+        const controls = {
+            next_page: findControlByText([
+                /next\s*(page|document|doc)?/i,
+                /^›$/,
+                /^»$/,
+                /^>$/,
+                /forward/i,
+            ]),
+            prev_page: findControlByText([
+                /prev(ious)?\s*(page|document|doc)?/i,
+                /^‹$/,
+                /^«$/,
+                /^<$/,
+                /back/i,
+            ]),
+            first_page: findControlByText([/first\s*page/i, /^««$/, /^\|<$/]),
+            last_page: findControlByText([/last\s*page/i, /^»»$/, /^>\|$/]),
+        };
+        const scroll_container = findScrollContainerNear(region || primary);
+        let primary_img_src = '';
+        if (primary && primary.tagName === 'IMG') primary_img_src = primary.currentSrc || primary.src || '';
+        if (primary && primary.tagName === 'IFRAME') primary_img_src = primary.src || '';
+        return {
+            controls,
+            scroll_container,
+            page_label: extractPageLabelNear(region),
+            region_hint: region ? `${region.tagName}.${(region.className || '').toString().slice(0, 60)}` : null,
+            primary_tag: primary ? primary.tagName.toLowerCase() : null,
+            primary_img_src: primary_img_src.slice(0, 500),
+        };
+    }
+
+    function viewerSignals() {
+        const inv = inventoryViewer();
+        const found = findViewerRegion();
+        const region = found && found.region;
+        const primary = found && found.primary;
+        let scroll_top = 0;
+        if (inv.scroll_container) {
+            try {
+                const el = document.querySelector(inv.scroll_container);
+                if (el) scroll_top = el.scrollTop || 0;
+            } catch (e) { /* ignore */ }
+        }
+        let viewer_text_sample = '';
+        if (region && region.innerText) {
+            viewer_text_sample = region.innerText.replace(/\s+/g, ' ').trim().slice(0, 800);
+        }
+        let primary_img_src = inv.primary_img_src || '';
+        if (!primary_img_src && primary && primary.tagName === 'IMG') {
+            primary_img_src = (primary.currentSrc || primary.src || '').slice(0, 500);
+        }
+        return {
+            url: location.href,
+            title: document.title,
+            page_label: inv.page_label || '',
+            viewer_text_sample,
+            primary_img_src,
+            scroll_top,
+        };
+    }
+
+    function parseBatchRow(tr) {
+        if (!tr || !isVisible(tr)) return null;
+        const cells = Array.from(tr.querySelectorAll('td, th'));
+        if (cells.length < 1) return null;
+        // Skip header-only rows with no data-ish cells.
+        const inputs = tr.querySelectorAll('input, textarea, select').length;
+        if (inputs > 2) return null; // likely a form grid, not batch list
+        const texts = cells.map((c) => (c.innerText || '').trim()).filter(Boolean);
+        if (!texts.length) return null;
+        const rowText = texts.join(' | ').slice(0, 200);
+        // Prefer an anchor / button inside the row for the click selector.
+        const link = tr.querySelector('a[href], button, [role="button"], [role="link"]');
+        const target = link ? resolveClickTarget(link) : resolveClickTarget(tr);
+        let selector = buildSelector(target);
+        if (!selector && target && target.tagName === 'A' && target.getAttribute('href')) {
+            try {
+                selector = `a[href="${CSS.escape(target.getAttribute('href'))}"]`;
+            } catch (e) {
+                selector = null;
+            }
+        }
+        if (!selector && tr.id) {
+            try { selector = `#${CSS.escape(tr.id)}`; } catch (e) { selector = `#${tr.id}`; }
+        }
+        if (!selector) {
+            // Last resort: nth-of-type under parent table.
+            const table = tr.closest('table');
+            if (table) {
+                const rows = Array.from(table.querySelectorAll('tr'));
+                const idx = rows.indexOf(tr) + 1;
+                if (idx > 0) selector = `table tr:nth-child(${idx})`;
+            }
+        }
+        if (!selector) return null;
+
+        const id = texts[0].slice(0, 80);
+        let status = '';
+        let assigned_to = '';
+        let created = '';
+        for (const t of texts) {
+            const low = t.toLowerCase();
+            if (/in\s*progress|ready|locked|new|pending|review|complete/.test(low) && low.length < 40) {
+                status = status || t;
+            }
+            if (/^\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}$/.test(t) || /^\d{4}-\d{2}-\d{2}/.test(t)) {
+                created = created || t;
+            }
+        }
+        // Assignee often last non-empty cell that isn't the id/date/status.
+        for (let i = texts.length - 1; i >= 1; i -= 1) {
+            const t = texts[i];
+            if (t === status || t === created || t === id) continue;
+            if (/^\d+$/.test(t)) continue;
+            if (t.length >= 2 && t.length < 60) {
+                assigned_to = t;
+                break;
+            }
+        }
+        return {
+            id,
+            created,
+            status,
+            assigned_to,
+            selector,
+            text: rowText,
+        };
+    }
+
+    function inventoryBatchList() {
+        const controls = {
+            next_page: findControlByText([
+                /next\s*(page)?/i,
+                /^next$/i,
+                /^›$/,
+                /^»$/,
+                /pagination.*next/i,
+            ]),
+            prev_page: findControlByText([
+                /prev(ious)?\s*(page)?/i,
+                /^prev(ious)?$/i,
+                /^‹$/,
+                /^«$/,
+            ]),
+        };
+        const page_label = extractPageLabelNear(document.body);
+
+        // Prefer tables that look like batch lists: many rows, few inputs.
+        const tables = Array.from(document.querySelectorAll('table'));
+        let bestRows = [];
+        let bestScore = -1;
+        for (const table of tables) {
+            const trs = Array.from(table.querySelectorAll('tr'));
+            const inputs = table.querySelectorAll('input, textarea, select').length;
+            if (trs.length < 2) continue;
+            if (inputs > trs.length) continue; // form table
+            const parsed = [];
+            for (const tr of trs) {
+                // skip pure header
+                if (tr.querySelectorAll('th').length && !tr.querySelector('td')) continue;
+                const row = parseBatchRow(tr);
+                if (row) parsed.push(row);
+            }
+            const score = parsed.length * 10 - inputs;
+            if (parsed.length >= 1 && score > bestScore) {
+                bestScore = score;
+                bestRows = parsed;
+            }
+        }
+
+        // Fallback: role=row list items
+        if (!bestRows.length) {
+            const roleRows = Array.from(document.querySelectorAll('[role="row"], li'));
+            for (const el of roleRows) {
+                if (!isVisible(el)) continue;
+                const text = (el.innerText || '').trim();
+                if (text.length < 3 || text.length > 300) continue;
+                if (/add\s*row|validate|document\s*type/i.test(text)) continue;
+                const link = el.querySelector('a[href], button, [role="button"]') || el;
+                const target = resolveClickTarget(link);
+                const selector = buildSelector(target);
+                if (!selector) continue;
+                const id = text.split(/\n|\|/)[0].trim().slice(0, 80);
+                bestRows.push({
+                    id,
+                    created: '',
+                    status: '',
+                    assigned_to: '',
+                    selector,
+                    text: text.slice(0, 200),
+                });
+                if (bestRows.length >= 40) break;
+            }
+        }
+
+        return {
+            controls,
+            page_label,
+            rows: bestRows.slice(0, 50),
+        };
+    }
+
+    function batchListSignals() {
+        const inv = inventoryBatchList();
+        const ids = (inv.rows || []).map((r) => r.id);
+        const fieldsInv = inventoryFields();
+        return {
+            url: location.href,
+            title: document.title,
+            page_label: inv.page_label || '',
+            first_batch_id: ids[0] || '',
+            last_batch_id: ids.length ? ids[ids.length - 1] : '',
+            batch_ids_sample: ids.slice(0, 12),
+            field_count: (fieldsInv.fields || []).length,
+            page_kind: (() => {
+                try {
+                    // Lightweight local hint — full classify happens in SW.
+                    if ((inv.rows || []).length >= 2) return 'batch_list';
+                } catch (e) { /* ignore */ }
+                return 'unknown';
+            })(),
+        };
     }
 
     function inventoryTable() {
@@ -908,6 +1227,10 @@
                 case 'set_scroll_y': reply(true, setScrollY(msg.y)); break;
                 case 'inventory_fields': reply(true, inventoryFields()); break;
                 case 'inventory_table': reply(true, inventoryTable()); break;
+                case 'inventory_viewer': reply(true, inventoryViewer()); break;
+                case 'viewer_signals': reply(true, viewerSignals()); break;
+                case 'inventory_batch_list': reply(true, inventoryBatchList()); break;
+                case 'batch_list_signals': reply(true, batchListSignals()); break;
                 case 'read_field': reply(true, readField(msg.field_id, msg.selector)); break;
                 case 'fill_by_id': reply(true, fillById(msg.field_id, msg.value, msg.selector)); break;
                 case 'page_signals': reply(true, pageSignals()); break;

@@ -11,16 +11,24 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
     agentOpensTableTab,
+    batchListPageChanged,
+    batchOpened,
     buildDetailsActions,
     buildGatherPrompt,
     buildLineItemActions,
+    buildNextExtrasPrompt,
     findDocTypeField,
+    formatFailedSelectors,
     isAllowedGatherClick,
+    isPaginationClick,
     isTableTabClick,
+    isViewerCatalogClick,
     pickNextBatch,
     sanitizeDetailsPlan,
     sanitizeLineItemsPlan,
+    signalsChanged,
     simulateFillRun,
+    viewerPageChanged,
 } from '../extension/lib/fill_plan.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -215,13 +223,80 @@ describe('gather click guards', () => {
         assert.equal(isAllowedGatherClick({ action: 'click', selector: '#random', note: 'mystery' }, 'fill_details'), false);
     });
 
-    it('gather prompts tell human to open Table / stop after details', () => {
+    it('whitelists catalog selectors when viewer inventory present', () => {
+        const catalog = { controls: { next_page: { selector: '#viewerNext', label: 'Next' } } };
+        assert.equal(isViewerCatalogClick({ action: 'click', selector: '#viewerNext' }, catalog), true);
+        assert.equal(isAllowedGatherClick({ action: 'click', selector: '#viewerNext', note: 'next' }, 'fill_details', catalog), true);
+        assert.equal(isAllowedGatherClick({ action: 'click', selector: '#other', note: 'document next page' }, 'fill_details', catalog), false);
+    });
+
+    it('gather prompts include viewer catalog and failed selectors', () => {
         const obs = { url: 'u', title: 't', text: 'x', html: 'h', scroll: { y: 0, maxY: 1, atBottom: true } };
-        const details = buildGatherPrompt('fill_details', obs, []);
+        const details = buildGatherPrompt('fill_details', obs, [], {
+            viewerCatalog: { controls: { next_page: { selector: '#n' } } },
+            failedSelectors: [{ selector: '#bad', reason: 'NO_EFFECT' }],
+        });
+        assert.match(details, /VIEWER CONTROLS/);
+        assert.match(details, /#n/);
+        assert.match(details, /FAILED SELECTORS/);
+        assert.match(details, /#bad/);
         const lines = buildGatherPrompt('fill_line_items', obs, []);
-        assert.match(details, /Do NOT open the line-item Table/i);
         assert.match(lines, /HUMAN already opened the Table/i);
         assert.match(lines, /Do NOT click Table/i);
+        assert.match(details, /Do NOT open the line-item Table/i);
+    });
+});
+
+describe('click effect verification helpers', () => {
+    it('signalsChanged detects fingerprint diffs', () => {
+        assert.equal(signalsChanged({ a: '1' }, { a: '2' }, ['a']), true);
+        assert.equal(signalsChanged({ a: '1' }, { a: '1' }, ['a']), false);
+        assert.equal(signalsChanged({ ids: ['a'] }, { ids: ['b'] }, ['ids']), true);
+    });
+
+    it('viewerPageChanged uses page label / text / img / scroll', () => {
+        assert.equal(viewerPageChanged(
+            { page_label: '1 of 3', viewer_text_sample: 'x', primary_img_src: 'a', scroll_top: 0 },
+            { page_label: '2 of 3', viewer_text_sample: 'x', primary_img_src: 'a', scroll_top: 0 },
+        ), true);
+        assert.equal(viewerPageChanged(
+            { page_label: '1 of 3', viewer_text_sample: 'x', primary_img_src: 'a', scroll_top: 0 },
+            { page_label: '1 of 3', viewer_text_sample: 'x', primary_img_src: 'a', scroll_top: 0 },
+        ), false);
+    });
+
+    it('batchListPageChanged and batchOpened', () => {
+        assert.equal(batchListPageChanged(
+            { page_label: '1 of 2', first_batch_id: 'A', last_batch_id: 'B', batch_ids_sample: ['A'], url: 'http://x/list' },
+            { page_label: '2 of 2', first_batch_id: 'C', last_batch_id: 'D', batch_ids_sample: ['C'], url: 'http://x/list' },
+        ), true);
+        assert.equal(batchOpened(
+            { url: 'http://x/batches', title: 'Batch List', field_count: 0, page_kind: 'batch_list' },
+            { url: 'http://x/batches/123', title: 'Validate Document', field_count: 8, page_kind: 'details' },
+        ), true);
+        assert.equal(batchOpened(
+            { url: 'http://x/batches', title: 'Batch List', field_count: 0, page_kind: 'batch_list' },
+            { url: 'http://x/batches', title: 'Batch List', field_count: 0, page_kind: 'batch_list' },
+        ), false);
+    });
+
+    it('formatFailedSelectors and pagination helpers', () => {
+        assert.match(formatFailedSelectors([{ selector: '#x', reason: 'NO_EFFECT' }]), /DO NOT RETRY/);
+        assert.equal(formatFailedSelectors([]), '');
+        assert.equal(isPaginationClick({ action: 'click', note: 'next page' }), true);
+        assert.equal(isPaginationClick({ action: 'click', note: 'open batch B0' }), false);
+    });
+
+    it('NEXT extras prompt includes catalog and recommendation', () => {
+        const p = buildNextExtrasPrompt(
+            { controls: { next_page: { selector: '#next' } }, rows: [{ id: 'B0', selector: 'a#b0' }] },
+            [{ selector: 'span.bad' }],
+            { id: 'B0', selector: 'a#b0' },
+        );
+        assert.match(p, /BATCH LIST CONTROLS/);
+        assert.match(p, /RECOMMENDED_BATCH/);
+        assert.match(p, /FAILED SELECTORS/);
+        assert.match(p, /span\.bad/);
     });
 });
 
@@ -367,10 +442,25 @@ describe('repo audit: human opens Table / agent stops after fill', () => {
         assert.match(sw, /isTableTabClick/);
         assert.match(sw, /isAllowedGatherClick/);
     });
+    it('SW verifies nav clicks and remembers failed selectors', () => {
+        assert.match(sw, /viewerPageChanged/);
+        assert.match(sw, /batchListPageChanged/);
+        assert.match(sw, /batchOpened/);
+        assert.match(sw, /failedSelectors/);
+        assert.match(sw, /auto_fallback/);
+        assert.match(sw, /NO_EFFECT/);
+        assert.match(sw, /inventory_viewer/);
+        assert.match(sw, /inventory_batch_list/);
+        assert.match(sw, /pickNextBatch/);
+        assert.match(sw, /buildNextExtrasPrompt/);
+    });
     it('prompts say human opens Table and details stop', () => {
         assert.match(sys, /HUMAN has already clicked the Table/i);
         assert.match(sys, /STOPS/);
         assert.match(sys, /Do not click Table yourself/i);
+        assert.match(sys, /VIEWER CONTROLS/);
+        assert.match(sys, /NO_EFFECT/);
+        assert.match(sys, /BATCH LIST CONTROLS/);
     });
     it('Fill Line Items button title mentions open Table first', () => {
         assert.match(html, /Open the Table view yourself first/i);

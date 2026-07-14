@@ -637,11 +637,18 @@ describe('full regression audit: all recent features present', () => {
         assert.match(sw, /page_gate_blocked/);
         assert.match(sw, /outcome: 'page_blocked'/);
         assert.doesNotMatch(sw, /Opening Table view/);
+        assert.match(sw, /viewerPageChanged/);
+        assert.match(sw, /failedSelectors/);
+        assert.match(sw, /auto_fallback/);
     });
 
     it('content script inventories + page_signals', () => {
         assert.match(cs, /inventory_fields/);
         assert.match(cs, /inventory_table/);
+        assert.match(cs, /inventory_viewer/);
+        assert.match(cs, /viewer_signals/);
+        assert.match(cs, /inventory_batch_list/);
+        assert.match(cs, /batch_list_signals/);
         assert.match(cs, /page_signals/);
         assert.match(cs, /fill_by_id/);
         assert.match(cs, /wait_for_row/);
@@ -655,6 +662,8 @@ describe('full regression audit: all recent features present', () => {
         assert.match(sys, /FILL LINE ITEMS/);
         assert.match(sys, /done_gathering/);
         assert.match(sys, /NEVER CLICK VALIDATE/);
+        assert.match(sys, /NO_EFFECT/);
+        assert.match(sys, /VIEWER CONTROLS|Document viewer pagination/i);
     });
 
     it('README documents split fill + page gate + update.ps1', () => {

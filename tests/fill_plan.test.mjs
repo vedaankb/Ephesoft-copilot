@@ -517,6 +517,8 @@ describe('repo audit: UI split fill', () => {
     it('content script inventories fields/table', () => {
         assert.match(cs, /inventory_fields/);
         assert.match(cs, /inventory_table/);
+        assert.match(cs, /inventory_viewer/);
+        assert.match(cs, /inventory_batch_list/);
         assert.match(cs, /fill_by_id/);
         assert.match(cs, /read_field/);
         assert.match(cs, /wait_for_row/);
@@ -526,6 +528,7 @@ describe('repo audit: UI split fill', () => {
         assert.match(sys, /FILL LINE ITEMS/);
         assert.match(sys, /done_gathering/);
         assert.match(sys, /field_id/);
+        assert.match(sys, /NO_EFFECT/);
     });
     it('safety bans still present', () => {
         assert.match(cs, /validate/);
@@ -578,6 +581,11 @@ describe('repo audit: fill_plan module exports used by SW', () => {
         'sanitizeLineItemsPlan',
         'summarizeContextBuffer',
         'valuesRoughlyEqual',
+        'viewerPageChanged',
+        'batchListPageChanged',
+        'batchOpened',
+        'pickNextBatch',
+        'buildNextExtrasPrompt',
     ]) {
         it(`SW references ${name}`, () => assert.match(sw, new RegExp(name)));
     }

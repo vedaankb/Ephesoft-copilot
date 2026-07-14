@@ -332,7 +332,127 @@ export function valuesRoughlyEqual(expected, actual) {
     return false;
 }
 
-export function buildGatherPrompt(mode, observation, history) {
+/**
+ * True if any listed fingerprint key differs between before/after snapshots.
+ * String values compare trimmed; arrays compare joined; missing keys count as change only if the other side has a value.
+ */
+export function signalsChanged(before, after, keys) {
+    if (!before || !after || !Array.isArray(keys) || !keys.length) return false;
+    for (const key of keys) {
+        const a = before[key];
+        const b = after[key];
+        if (Array.isArray(a) || Array.isArray(b)) {
+            const as = JSON.stringify(a ?? null);
+            const bs = JSON.stringify(b ?? null);
+            if (as !== bs) return true;
+            continue;
+        }
+        const as = a == null ? '' : String(a).trim();
+        const bs = b == null ? '' : String(b).trim();
+        if (as !== bs) return true;
+    }
+    return false;
+}
+
+export function viewerPageChanged(before, after) {
+    return signalsChanged(before, after, [
+        'page_label',
+        'viewer_text_sample',
+        'primary_img_src',
+        'scroll_top',
+    ]);
+}
+
+export function batchListPageChanged(before, after) {
+    return signalsChanged(before, after, [
+        'page_label',
+        'first_batch_id',
+        'last_batch_id',
+        'batch_ids_sample',
+        'url',
+    ]);
+}
+
+/** True if a batch-list click opened a batch (navigated away from list into detail). */
+export function batchOpened(before, after) {
+    if (!before || !after) return false;
+    if (signalsChanged(before, after, ['url']) && after.url && before.url && after.url !== before.url) {
+        // Stay on list if only query page= changed; treat path/hash change as open.
+        try {
+            const bu = new URL(before.url, 'https://example.invalid');
+            const au = new URL(after.url, 'https://example.invalid');
+            if (bu.pathname !== au.pathname || bu.hash !== au.hash) return true;
+        } catch (e) {
+            return true;
+        }
+    }
+    const bt = String(before.title || '').toLowerCase();
+    const at = String(after.title || '').toLowerCase();
+    if (at && at !== bt && /batch|document|validate|review|detail/.test(at) && /list|inbox|queue|batches/.test(bt)) {
+        return true;
+    }
+    if (before.page_kind === 'batch_list' && after.page_kind && after.page_kind !== 'batch_list' && after.page_kind !== 'unknown') {
+        return true;
+    }
+    // Detail surface cues: more form fields appeared.
+    const bf = Number(before.field_count) || 0;
+    const af = Number(after.field_count) || 0;
+    if (af >= 3 && af > bf + 1) return true;
+    return false;
+}
+
+/** Prompt block listing selectors that must not be retried. */
+export function formatFailedSelectors(failed) {
+    if (!failed || !failed.length) return '';
+    const lines = failed.map((f, i) => {
+        if (typeof f === 'string') return `${i + 1}. ${f}`;
+        const sel = f.selector || f.sel || '(unknown)';
+        const reason = f.reason ? ` (${f.reason})` : '';
+        return `${i + 1}. ${sel}${reason}`;
+    });
+    return [
+        'FAILED SELECTORS - DO NOT RETRY these exact selectors. Pick a different selector or strategy (catalog control, scroll, or alternate row link):',
+        ...lines,
+    ].join('\n');
+}
+
+/** Catalog control selectors for a viewer or batch-list inventory. */
+export function catalogControlSelectors(catalog) {
+    const out = [];
+    if (!catalog || !catalog.controls) return out;
+    for (const key of Object.keys(catalog.controls)) {
+        const c = catalog.controls[key];
+        if (c && c.selector) out.push(String(c.selector));
+    }
+    if (catalog.scroll_container) out.push(String(catalog.scroll_container));
+    return out;
+}
+
+/** True if click selector matches an inventoried viewer control. */
+export function isViewerCatalogClick(action, viewerCatalog) {
+    if (!action || action.action !== 'click') return false;
+    const sel = String(action.selector || '').trim();
+    if (!sel) return false;
+    const allowed = catalogControlSelectors(viewerCatalog);
+    if (!allowed.length) return false;
+    return allowed.some((a) => a === sel || sel.includes(a) || a.includes(sel));
+}
+
+/** Detect pagination intent from action note/selector. */
+export function isPaginationClick(action) {
+    if (!action || action.action !== 'click') return false;
+    const blob = `${action.selector || ''} ${action.note || ''} ${action.reason || ''}`.toLowerCase();
+    return /next|prev|previous|page\s*\d|pagination|›|»|‹|«/.test(blob);
+}
+
+/** Prefer prev when note indicates previous; else next. */
+export function paginationFallbackDirection(action) {
+    const blob = `${action?.selector || ''} ${action?.note || ''} ${action?.reason || ''}`.toLowerCase();
+    if (/\bprev|previous|‹|«\b/.test(blob)) return 'prev_page';
+    return 'next_page';
+}
+
+export function buildGatherPrompt(mode, observation, history, extras = {}) {
     const scope = mode === 'fill_line_items'
         ? 'LINE ITEMS only. The HUMAN already opened the Table view. Scroll the document and/or table if needed. Do NOT click Table tab. Do NOT fill yet.'
         : 'HEADER / DETAILS fields only (doc type, names, amounts, dates). Do NOT fill yet. Do NOT open the line-item Table view - Fill Details stops after header fields.';
@@ -340,9 +460,13 @@ export function buildGatherPrompt(mode, observation, history) {
     const allowed = mode === 'fill_line_items'
         ? 'You may ONLY: scroll, or click document-viewer next/previous page. Never click Table / Add Row / Clear during gather.'
         : 'You may ONLY: scroll, or click document-viewer next/previous page. Never open Table or fill fields during gather.';
-    return [
+    const viewerCatalog = extras.viewerCatalog || null;
+    const failedSelectors = extras.failedSelectors || [];
+    const failedBlock = formatFailedSelectors(failedSelectors);
+    const parts = [
         `PHASE: GATHER for ${modeLabel(mode)}. ${scope}`,
         allowed,
+        'Prefer VIEWER CONTROLS catalog selectors below for page turns. If a click returned NO_EFFECT, do not retry that selector — use an alternate catalog control or scroll the viewer container.',
         'When you have enough screenshots/context, respond with {"action":"done_gathering","reason":"..."}.',
         'If the SOP requires stopping, respond with {"action":"incomplete","reason":"<SOP reason>","note":"..."}.',
         'Do NOT fill, select, or add rows during gather.',
@@ -351,6 +475,14 @@ export function buildGatherPrompt(mode, observation, history) {
         `PAGE TITLE: ${observation.title}`,
         `SCROLL: y=${observation.scroll?.y} maxY=${observation.scroll?.maxY} atBottom=${observation.scroll?.atBottom}`,
         '',
+        'VIEWER CONTROLS (use these selectors for document page turns):',
+        viewerCatalog ? JSON.stringify(viewerCatalog, null, 2) : '(none inventoried yet)',
+        '',
+    ];
+    if (failedBlock) {
+        parts.push(failedBlock, '');
+    }
+    parts.push(
         'GATHER ACTIONS SO FAR:',
         hist,
         '',
@@ -361,7 +493,41 @@ export function buildGatherPrompt(mode, observation, history) {
         observation.html || '',
         '',
         'Respond with ONE JSON object: scroll | click | done_gathering | incomplete.',
-    ].join('\n');
+    );
+    return parts.join('\n');
+}
+
+/** NEXT-mode extras: batch list catalog + failed selectors + optional recommended batch. */
+export function buildNextExtrasPrompt(batchCatalog, failedSelectors, recommendedBatch) {
+    const parts = [
+        'BATCH LIST CONTROLS (prefer these for pagination):',
+        batchCatalog ? JSON.stringify({
+            controls: batchCatalog.controls || {},
+            page_label: batchCatalog.page_label || null,
+            row_count: (batchCatalog.rows || []).length,
+        }, null, 2) : '(none)',
+        '',
+        'VISIBLE BATCH ROWS (prefer click selector on a / tr / role=button, not a bare text span):',
+        batchCatalog && batchCatalog.rows
+            ? JSON.stringify(batchCatalog.rows.slice(0, 40), null, 2)
+            : '(none)',
+    ];
+    if (recommendedBatch) {
+        parts.push(
+            '',
+            'RECOMMENDED_BATCH (oldest eligible on this page — click its selector if still valid):',
+            JSON.stringify(recommendedBatch),
+        );
+    }
+    const failedBlock = formatFailedSelectors(failedSelectors);
+    if (failedBlock) {
+        parts.push('', failedBlock);
+    }
+    parts.push(
+        '',
+        'If a click returned NO_EFFECT, never retry that exact selector. For pagination use BATCH LIST CONTROLS. For opening a batch prefer the row link/tr.',
+    );
+    return parts.join('\n');
 }
 
 export function buildDecidePrompt(mode, contextSummary, catalog) {
@@ -453,13 +619,18 @@ export function isTableTabClick(action) {
 }
 
 /** True if gather click is a safe doc-viewer page control. */
-export function isAllowedGatherClick(action, mode) {
+export function isAllowedGatherClick(action, mode, viewerCatalog = null) {
     if (!action || action.action !== 'click') return false;
     if (isTableTabClick(action)) return false;
     const blob = `${action.selector || ''} ${action.note || ''} ${action.reason || ''}`.toLowerCase();
     // Block mutate controls during gather.
     if (/add\s*row|clear|validate|submit|skip|merge|split/.test(blob)) return false;
-    // Allow document viewer pagination / zoom-ish language.
+    const catalogSels = catalogControlSelectors(viewerCatalog);
+    // When an inventory exists, only allow catalog selectors (or exact matches).
+    if (catalogSels.length) {
+        return isViewerCatalogClick(action, viewerCatalog);
+    }
+    // Allow document viewer pagination / zoom-ish language when no catalog yet.
     if (/page|next|prev|previous|viewer|zoom|document/.test(blob)) return true;
     // For fill modes, reject unknown clicks during gather (prefer scroll / done_gathering).
     if (mode === 'fill_details' || mode === 'fill_line_items') return false;

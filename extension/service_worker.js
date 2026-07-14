@@ -13,20 +13,27 @@ import { verifyLicenseOffline } from './lib/license.js';
 import {
     MAX_GATHER_STEPS,
     MAX_RECOVERY_CALLS,
+    batchListPageChanged,
+    batchOpened,
     buildDecidePrompt,
     buildDetailsActions,
     buildGatherPrompt,
     buildLineItemActions,
+    buildNextExtrasPrompt,
     detectPageKind,
     evaluatePageGate,
     isAllowedGatherClick,
+    isPaginationClick,
     isTableTabClick,
     modeLabel,
     pageKindLabel,
+    paginationFallbackDirection,
+    pickNextBatch,
     sanitizeDetailsPlan,
     sanitizeLineItemsPlan,
     summarizeContextBuffer,
     valuesRoughlyEqual,
+    viewerPageChanged,
 } from './lib/fill_plan.js';
 
 // ---------- side panel wiring ----------
@@ -401,17 +408,25 @@ function taskHeader(mode) {
     return 'TASK MODE: FILL DETAILS. Gather context, decide header field values into memory, fill details only, then stop. Do not open Table or fill line items.';
 }
 
-function buildUserText(mode, o, history) {
+function buildUserText(mode, o, history, extras = {}) {
     const hist = history.length
         ? history.map((h, i) => `${i + 1}. ${h}`).join('\n')
         : '(none yet)';
-    return [
+    const parts = [
         taskHeader(mode),
         '',
         `CURRENT URL: ${o.url}`,
         `PAGE TITLE: ${o.title}`,
         `SCROLL: y=${o.scroll.y} maxY=${o.scroll.maxY} atBottom=${o.scroll.atBottom} (pageHeight=${o.scroll.pageHeight}, viewport=${o.scroll.viewportHeight})`,
         '',
+    ];
+    if (mode === 'next' && (extras.batchCatalog || (extras.failedSelectors && extras.failedSelectors.length) || extras.recommendedBatch)) {
+        parts.push(
+            buildNextExtrasPrompt(extras.batchCatalog, extras.failedSelectors || [], extras.recommendedBatch),
+            '',
+        );
+    }
+    parts.push(
         'ACTIONS TAKEN SO FAR (with results):',
         hist,
         '',
@@ -422,14 +437,49 @@ function buildUserText(mode, o, history) {
         o.html,
         '',
         'Respond with EXACTLY ONE next action as a single JSON object per the system instructions.',
-    ].join('\n');
+    );
+    return parts.join('\n');
 }
 
 function summarizeStep(action, res) {
     const tgt = action.selector || (action.direction ? `(${action.direction})` : '');
     const val = action.value != null ? ` = "${action.value}"` : '';
-    const outcome = res && res.ok ? 'ok' : `ERROR: ${res && res.error ? res.error : 'unknown'}`;
+    let outcome = 'unknown';
+    if (res && res.no_effect) outcome = 'NO_EFFECT';
+    else if (res && res.ok) outcome = 'ok';
+    else outcome = `ERROR: ${res && res.error ? res.error : 'unknown'}`;
     return `${action.action} ${tgt}${val} -> ${outcome}`;
+}
+
+function failedHasSelector(failedSelectors, selector) {
+    const sel = String(selector || '').trim();
+    if (!sel) return false;
+    return failedSelectors.some((f) => (typeof f === 'string' ? f : f.selector) === sel);
+}
+
+function pushFailedSelector(failedSelectors, selector, reason) {
+    const sel = String(selector || '').trim();
+    if (!sel || failedHasSelector(failedSelectors, sel)) return;
+    failedSelectors.push({ selector: sel, reason: reason || 'NO_EFFECT' });
+}
+
+async function getViewerSignals(tabId) {
+    const resp = await sendToTab(tabId, { cmd: 'viewer_signals' });
+    return (resp && resp.ok) ? resp.result : null;
+}
+
+async function getBatchListSignals(tabId) {
+    const resp = await sendToTab(tabId, { cmd: 'batch_list_signals' });
+    return (resp && resp.ok) ? resp.result : null;
+}
+
+async function tryAutoFallbackClick(tabId, catalog, directionKey, failedSelectors) {
+    const control = catalog && catalog.controls && catalog.controls[directionKey];
+    if (!control || !control.selector) return null;
+    if (failedHasSelector(failedSelectors, control.selector)) return null;
+    status(`Auto-fallback: clicking catalog ${directionKey} (${control.selector})...`, 'warn');
+    const res = await executeAction(tabId, { action: 'click', selector: control.selector });
+    return { selector: control.selector, res, directionKey };
 }
 
 async function executeAction(tabId, action) {
@@ -474,6 +524,8 @@ async function runAgent(mode, preferredTabId, opts = {}) {
     const maxSteps = mode === 'fill' ? 80 : 30;
     const recent = [];           // ring buffer of recent action keys
     let lastScrollY = null;      // to detect scrolls that no longer move the page
+    const failedSelectors = [];
+    let navNoEffectStreak = 0;
 
     for (let step = 1; step <= maxSteps; step += 1) {
         if (abortRequested) {
@@ -487,13 +539,27 @@ async function runAgent(mode, preferredTabId, opts = {}) {
         if (!obsResp || !obsResp.ok) throw new Error(`Could not read page: ${obsResp && obsResp.error}`);
         const o = obsResp.result;
 
+        let batchCatalog = null;
+        let recommendedBatch = null;
+        if (mode === 'next') {
+            const inv = await sendToTab(tab.id, { cmd: 'inventory_batch_list' });
+            if (inv && inv.ok) {
+                batchCatalog = inv.result;
+                const pick = pickNextBatch(batchCatalog.rows || []);
+                if (pick) recommendedBatch = { id: pick.id, selector: pick.selector, status: pick.status, created: pick.created };
+            }
+        }
+
         const shot = await captureViewport(tab.windowId);
         if (!shot && step === 1) {
             status('Screenshot unavailable (VM/RDP?) — running text-only mode.', 'warn');
         }
-        const userText = buildUserText(mode, o, history);
+        const promptExtras = mode === 'next'
+            ? { batchCatalog, failedSelectors, recommendedBatch }
+            : {};
+        const userText = buildUserText(mode, o, history, promptExtras);
         // Lighter prompt used for the timeout retry: drop the bulky HTML slice.
-        const liteUserText = buildUserText(mode, { ...o, html: '(omitted for speed - rely on visible text and prior actions)' }, history);
+        const liteUserText = buildUserText(mode, { ...o, html: '(omitted for speed - rely on visible text and prior actions)' }, history, promptExtras);
 
         const signal = runController ? runController.signal : undefined;
         const raw = await think({
@@ -558,6 +624,13 @@ async function runAgent(mode, preferredTabId, opts = {}) {
             return;
         }
 
+        // Skip re-executing known dead selectors in NEXT mode.
+        if (mode === 'next' && action.action === 'click' && failedHasSelector(failedSelectors, action.selector)) {
+            status(`Skipping previously failed selector: ${action.selector}`, 'warn');
+            history.push(`click ${action.selector} -> SKIPPED (failed earlier)`);
+            continue;
+        }
+
         // --- loop guards (let legit repeats like scrolling through) ---
         const key = JSON.stringify([action.action, action.selector, action.value, action.direction]);
         recent.push(key);
@@ -570,6 +643,8 @@ async function runAgent(mode, preferredTabId, opts = {}) {
             if (consecutive >= 3 && lastScrollY != null && o.scroll && o.scroll.y === lastScrollY) {
                 throw new Error('Scrolling no longer moves the page (reached the end). Stopping.');
             }
+        } else if (action.action === 'click' && consecutive >= 2) {
+            throw new Error(`Stuck repeating the same click 2x: ${summarizeStep(action, { ok: true })}`);
         } else if (consecutive >= 3) {
             throw new Error(`Stuck repeating the same action 3x: ${summarizeStep(action, { ok: true })}`);
         }
@@ -584,7 +659,62 @@ async function runAgent(mode, preferredTabId, opts = {}) {
         lastScrollY = o.scroll ? o.scroll.y : lastScrollY;
 
         post({ type: 'step', step, action });
-        const res = await executeAction(tab.id, action);
+
+        let beforeSignals = null;
+        if (mode === 'next' && action.action === 'click') {
+            beforeSignals = await getBatchListSignals(tab.id);
+        }
+
+        let res = await executeAction(tab.id, action);
+
+        if (mode === 'next' && action.action === 'click' && res && res.ok) {
+            await sleep(1400);
+            const afterSignals = await getBatchListSignals(tab.id);
+            const wasPagination = isPaginationClick(action);
+            let changed = false;
+            if (wasPagination) {
+                changed = batchListPageChanged(beforeSignals, afterSignals);
+            } else {
+                changed = batchOpened(beforeSignals, afterSignals) || batchListPageChanged(beforeSignals, afterSignals);
+            }
+            if (!changed) {
+                res = { ok: false, no_effect: true, error: 'NO_EFFECT: page/batch did not change after click' };
+                pushFailedSelector(failedSelectors, action.selector, 'NO_EFFECT');
+                navNoEffectStreak += 1;
+
+                if (wasPagination && navNoEffectStreak >= 2 && batchCatalog) {
+                    const dir = paginationFallbackDirection(action);
+                    const fb = await tryAutoFallbackClick(tab.id, batchCatalog, dir, failedSelectors);
+                    if (fb) {
+                        await sleep(1400);
+                        const afterFb = await getBatchListSignals(tab.id);
+                        const fbChanged = batchListPageChanged(beforeSignals, afterFb);
+                        if (fbChanged) {
+                            history.push(summarizeStep(action, res));
+                            status(summarizeStep(action, res), 'warn');
+                            const okLine = `auto_fallback click ${fb.selector} -> ok`;
+                            history.push(okLine);
+                            status(okLine, 'success');
+                            navNoEffectStreak = 0;
+                            continue;
+                        }
+                        pushFailedSelector(failedSelectors, fb.selector, 'NO_EFFECT auto_fallback');
+                        history.push(summarizeStep(action, res));
+                        history.push(`auto_fallback click ${fb.selector} -> NO_EFFECT`);
+                        status(`Auto-fallback also NO_EFFECT for ${fb.selector}`, 'warn');
+                        navNoEffectStreak = 0;
+                        continue;
+                    }
+                }
+            } else {
+                navNoEffectStreak = 0;
+            }
+            const line = summarizeStep(action, res);
+            history.push(line);
+            status(line, res.ok ? 'info' : 'warn');
+            continue;
+        }
+
         const line = summarizeStep(action, res);
         history.push(line);
         status(line, res && res.ok ? 'info' : 'warn');
@@ -619,6 +749,8 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
     // --- Phase 1: Gather ---
     status(`Gathering context for ${modeLabel(mode)}...`, 'think');
     const gatherHistory = [];
+    const failedSelectors = [];
+    let viewerNoEffectStreak = 0;
     for (let step = 1; step <= MAX_GATHER_STEPS; step += 1) {
         if (abortRequested) {
             status('Stopped by user.', 'warn');
@@ -637,8 +769,13 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
             url: o.url,
         });
 
-        const userText = buildGatherPrompt(mode, o, gatherHistory);
-        const liteUserText = buildGatherPrompt(mode, { ...o, html: '(omitted)' }, gatherHistory);
+        let viewerCatalog = null;
+        const viewerInv = await sendToTab(tab.id, { cmd: 'inventory_viewer' });
+        if (viewerInv && viewerInv.ok) viewerCatalog = viewerInv.result;
+
+        const gatherExtras = { viewerCatalog, failedSelectors };
+        const userText = buildGatherPrompt(mode, o, gatherHistory, gatherExtras);
+        const liteUserText = buildGatherPrompt(mode, { ...o, html: '(omitted)' }, gatherHistory, gatherExtras);
         const raw = await think({
             apiKey: geminiApiKey,
             model: geminiModel,
@@ -695,16 +832,57 @@ async function runGatherDecideFill(mode, preferredTabId, opts = {}) {
         }
 
         if (action.action === 'click') {
-            if (isTableTabClick(action) || !isAllowedGatherClick(action, mode)) {
+            if (isTableTabClick(action) || !isAllowedGatherClick(action, mode, viewerCatalog)) {
                 status('Skipping disallowed gather click (human opens Table; gather is read-only aside from doc page turns).', 'warn');
                 gatherHistory.push(`blocked click ${action.selector || ''}`);
                 continue;
             }
-            const res = await executeAction(tab.id, action);
+            if (failedHasSelector(failedSelectors, action.selector)) {
+                status(`Skipping previously failed viewer selector: ${action.selector}`, 'warn');
+                gatherHistory.push(`click ${action.selector} -> SKIPPED (failed earlier)`);
+                continue;
+            }
+
+            const before = await getViewerSignals(tab.id);
+            let res = await executeAction(tab.id, action);
+            await sleep(1200);
+            const after = await getViewerSignals(tab.id);
+
+            if (res && res.ok && !viewerPageChanged(before, after)) {
+                res = { ok: false, no_effect: true, error: 'NO_EFFECT: document page did not change' };
+                pushFailedSelector(failedSelectors, action.selector, 'NO_EFFECT');
+                viewerNoEffectStreak += 1;
+
+                if (viewerNoEffectStreak >= 2 && viewerCatalog) {
+                    const dir = paginationFallbackDirection(action);
+                    const fb = await tryAutoFallbackClick(tab.id, viewerCatalog, dir, failedSelectors);
+                    if (fb) {
+                        await sleep(1200);
+                        const afterFb = await getViewerSignals(tab.id);
+                        if (viewerPageChanged(before, afterFb)) {
+                            gatherHistory.push(summarizeStep(action, res));
+                            status(summarizeStep(action, res), 'warn');
+                            const okLine = `auto_fallback click ${fb.selector} -> ok`;
+                            gatherHistory.push(okLine);
+                            status(okLine, 'success');
+                            viewerNoEffectStreak = 0;
+                            continue;
+                        }
+                        pushFailedSelector(failedSelectors, fb.selector, 'NO_EFFECT auto_fallback');
+                        gatherHistory.push(summarizeStep(action, res));
+                        gatherHistory.push(`auto_fallback click ${fb.selector} -> NO_EFFECT`);
+                        status('Auto-fallback also NO_EFFECT — try scrolling the viewer container.', 'warn');
+                        viewerNoEffectStreak = 0;
+                        continue;
+                    }
+                }
+            } else if (res && res.ok) {
+                viewerNoEffectStreak = 0;
+            }
+
             const line = summarizeStep(action, res);
             gatherHistory.push(line);
             status(line, res && res.ok ? 'info' : 'warn');
-            await sleep(1400);
             continue;
         }
 
