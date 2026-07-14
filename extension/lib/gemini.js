@@ -38,7 +38,7 @@ function withTimeout(external, timeoutMs) {
  */
 export async function callGemini({ apiKey, model, systemInstruction, userText, imageB64, signal, timeoutMs }) {
     if (!apiKey) throw new Error('No Gemini API key set. Open Settings in the panel and paste your key.');
-    const mdl = model || 'gemini-2.5-pro';
+    const mdl = model || 'gemini-3.5-flash';
     const url = `${API_BASE}/${encodeURIComponent(mdl)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
     const parts = [{ text: userText }];
@@ -91,7 +91,10 @@ export async function callGemini({ apiKey, model, systemInstruction, userText, i
             throw new Error(`Gemini access denied (403). Key may lack access to model "${mdl}". ${detail}`);
         }
         if (res.status === 404) {
-            throw new Error(`Model "${mdl}" not found (404). Pick a different model in Settings. ${detail}`);
+            throw new Error(
+                `Model "${mdl}" not found (404). New AI Studio keys often cannot use Gemini 2.5 — `
+                + `switch Settings to gemini-3.5-flash or gemini-3.1-pro-preview, Save, then Test key. ${detail}`
+            );
         }
         if (res.status === 429) {
             throw new Error('Gemini rate limit hit (429). Wait a moment and retry.');

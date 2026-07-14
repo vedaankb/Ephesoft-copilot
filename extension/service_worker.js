@@ -155,7 +155,7 @@ async function getSettings() {
     const local = await chrome.storage.local.get(['geminiApiKey', 'geminiModel']);
     return {
         geminiApiKey: managed.geminiApiKey || local.geminiApiKey || '',
-        geminiModel: managed.geminiModel || local.geminiModel || 'gemini-2.5-pro',
+        geminiModel: managed.geminiModel || local.geminiModel || 'gemini-3.5-flash',
         isManaged: !!(managed.geminiApiKey || managed.geminiModel),
     };
 }
@@ -283,7 +283,7 @@ function startThinkingHeartbeat(hasVision) {
         const secs = Math.round((Date.now() - startedAt) / 1000);
         let suffix = '';
         if (secs >= 90) suffix = ' - still working, will retry shortly if it stalls';
-        else if (secs >= 45) suffix = ' - taking longer than usual (gemini-2.5-pro is thorough)';
+        else if (secs >= 45) suffix = ' - taking longer than usual (model is being thorough)';
         status(`${base}... ${secs}s${suffix}`);
     }, 10000);
     return () => clearInterval(timer);

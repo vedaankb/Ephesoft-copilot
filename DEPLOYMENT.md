@@ -81,6 +81,46 @@ Unzip a release package and run `extension/copilot-launcher.bat` from inside the
 
 ---
 
+## 3a. Updating an Existing Pilot Install (`update.ps1`)
+
+When a new build is pushed to `main`, existing pilots should run the **updater** instead of a full reinstall. Profile data, license key, and Gemini API settings are preserved.
+
+**Recommended** (download then run — same 3-line pattern as install):
+
+```powershell
+$url = 'https://raw.githubusercontent.com/vedaankb/Ephesoft-copilot/main/update.ps1'
+$file = "$env:TEMP\ephesoft-update.ps1"
+Invoke-WebRequest -Uri $url -OutFile $file -UseBasicParsing; & $file
+```
+
+**Alternative** — run the local copy shipped by install/update:
+
+```powershell
+& "$env:LOCALAPPDATA\EphesoftCopilot\update.ps1"
+```
+
+Or from Command Prompt / File Explorer:
+
+```
+%LOCALAPPDATA%\EphesoftCopilot\update.ps1
+```
+
+### What the updater does
+1. Requires an existing install under `%LOCALAPPDATA%\EphesoftCopilot` (run `install.ps1` first if missing).
+2. Downloads the latest `main` branch from GitHub.
+3. Installs the extension into a fresh versioned `app-<timestamp>` folder (avoids file locks from a running browser).
+4. Refreshes desktop shortcuts to point at the new folder.
+5. Leaves `%LOCALAPPDATA%\EphesoftCopilot\profile` intact (login / license / API key survive).
+
+### After updating
+1. **Close** all Ephesoft Copilot browser windows (the dedicated-profile Chrome/Edge windows).
+2. Relaunch via the desktop shortcut (`Ephesoft Copilot (Chrome)` or `(Edge)`).
+3. Confirm the side panel still shows a valid license and the expected model/API key.
+
+> Avoid `irm ... | iex` for the updater as well — use the download-then-run pattern above on corporate PowerShell.
+
+---
+
 ## 4. Pre-Configuring Settings (Managed Storage Policy)
 
 Push the Gemini API key and model so end-users see **"Managed by IT policy"** and cannot edit settings.
@@ -89,7 +129,7 @@ Push the Gemini API key and model so end-users see **"Managed by IT policy"** an
 * Key: `HKLM\Software\Policies\Google\Chrome\3rdparty\extensions\<extension_id>\policy`
 * Values:
   * `geminiApiKey` (`REG_SZ`) — corporate Gemini key
-  * `geminiModel` (`REG_SZ`) — e.g. `gemini-2.5-pro`
+  * `geminiModel` (`REG_SZ`) — e.g. `gemini-3.5-flash` (new keys) or `gemini-3.1-pro-preview`
 
 ### Microsoft Edge
 * Key: `HKLM\Software\Policies\Microsoft\Edge\3rdparty\extensions\<extension_id>\policy`
@@ -116,7 +156,7 @@ node scripts/generate_license.js --client "Client Name" --expires "YYYY-MM-DD"
 
 Example:
 ```bash
-node scripts/generate_license.js --client "Quadrantech Pilot" --expires "2027-12-31"
+node scripts/generate_license.js --client "Quadrantech Pilot" --expires "2099-12-31"
 ```
 
 Send the Base64 output to the client. They paste it into **Settings → License Key → Save**.
@@ -169,11 +209,14 @@ Corporate TLS inspection may require adding Google's roots or an explicit allowl
 | Symptom | Likely cause | Fix |
 | :--- | :--- | :--- |
 | Extension not loading | Normal browser already open | Use desktop shortcut (dedicated profile) or GPO force-install |
+| Update says no install found | Ran update.ps1 before install | Run `install.ps1` first, then use `update.ps1` for upgrades |
+| Stale extension after update | Old browser window still open | Close all Copilot profile windows, then relaunch the desktop shortcut |
 | "Disable developer mode extensions" banner | `--load-extension` on default profile | Switch to GPO force-install for production |
 | License invalid | Wrong key, expired, or key rotation | Re-issue license; verify full Base64 pasted |
 | Managed settings missing | GPO not applied | `gpupdate /force`, check `chrome://policy` |
 | Fill less accurate in VM | Screenshot capture blocked | Normal — extension falls back to text-only; verify scroll/fill still completes |
 | Gemini 403/SSL | Proxy or key permissions | Allowlist API domain; verify API key and model access |
+| Model not found / "not offered to new customers" | Gemini 2.5 blocked for new AI Studio keys | Switch Settings model to `gemini-3.5-flash` or `gemini-3.1-pro-preview`, Save, Test key |
 
 ---
 

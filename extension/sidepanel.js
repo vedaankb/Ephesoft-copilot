@@ -337,7 +337,7 @@ async function loadSettings() {
     
     const lKey = local.licenseKey || '';
     const apiKey = managed.geminiApiKey || local.geminiApiKey || '';
-    const model = managed.geminiModel || local.geminiModel || 'gemini-2.5-pro';
+    const model = managed.geminiModel || local.geminiModel || 'gemini-3.5-flash';
 
     els.licenseKey.value = lKey;
     els.apiKey.value = apiKey;
