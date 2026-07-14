@@ -171,8 +171,12 @@ body {
 
 main {
     flex: 1;
+    min-height: 0; /* allow this flex child to shrink so overflow-y actually scrolls */
     overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
     padding: 16px;
+    padding-bottom: 28px; /* room to scroll past Save / Test on short panels */
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -395,8 +399,10 @@ main::-webkit-scrollbar-thumb:hover {
 .feed-wrap {
     display: flex;
     flex-direction: column;
-    flex: 1;
-    min-height: 150px;
+    flex: 1 1 auto;
+    min-height: 120px;
+    /* Cap height so Settings (Save / Test) stay reachable on short side panels */
+    max-height: min(42vh, 320px);
     padding: 0;
     overflow: hidden;
 }
@@ -537,7 +543,8 @@ main::-webkit-scrollbar-thumb:hover {
 /* --- Settings --- */
 .settings {
     padding: 0;
-    overflow: hidden;
+    overflow: visible;
+    flex-shrink: 0;
 }
 
 .settings summary {

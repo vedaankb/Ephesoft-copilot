@@ -194,6 +194,16 @@ els.stop.addEventListener('click', () => send({ type: 'stop' }));
 els.clearFeed.addEventListener('click', () => { els.feed.innerHTML = ''; });
 els.resetSession.addEventListener('click', () => resetSession());
 
+// On short side panels, scroll Settings into view so Save / Test are reachable.
+els.settings.addEventListener('toggle', () => {
+    if (!els.settings.open) return;
+    requestAnimationFrame(() => {
+        try {
+            els.settings.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        } catch (e) { /* noop */ }
+    });
+});
+
 async function resetSession() {
     // Clear the UI so stale results don't linger.
     clearResult();
